@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "edu-harness-scaffold",
+  "productName": "Edu Harness",
   "version": "0.1.0",
-  "identifier": "com.brent.edu-harness-scaffold",
+  "identifier": "com.brent.edu-harness",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -12,9 +12,9 @@
   "app": {
     "windows": [
       {
-        "title": "edu-harness-scaffold",
-        "width": 800,
-        "height": 600
+        "title": "Edu Harness",
+        "width": 900,
+        "height": 700
       }
     ],
     "security": {
@@ -31,5 +31,34 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "cli": {
+      "description": "Edu Harness — interactive educational book generator",
+      "args": [
+        {
+          "name": "api-key",
+          "short": "k",
+          "takesValue": true,
+          "description": "Anthropic Claude API key (implies --provider claude)"
+        },
+        {
+          "name": "provider",
+          "short": "p",
+          "takesValue": true,
+          "description": "LLM provider to use: claude or ollama (default: ollama)"
+        },
+        {
+          "name": "ollama-url",
+          "takesValue": true,
+          "description": "Ollama server base URL (default: http://localhost:11434)"
+        },
+        {
+          "name": "ollama-model",
+          "takesValue": true,
+          "description": "Ollama model name (default: llama3.2)"
+        }
+      ]
+    }
   }
 }
