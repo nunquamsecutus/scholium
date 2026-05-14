@@ -1,19 +1,58 @@
 import { createSignal } from "solid-js";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
+import { invoke } from "@tauri-apps/api/core";
+import type { Manifest } from "../types/manifest";
 
 interface Props {
-  onNext: (topic: string) => void;
+  onBook: (manifest: Manifest) => void;
 }
 
 export default function WelcomeModal(props: Props) {
   const [topic, setTopic] = createSignal("");
+  const [busy, setBusy] = createSignal(false);
+  const [error, setError] = createSignal("");
+
+  async function handleNext() {
+    setError("");
+    const dialogPath = await save({
+      title: "Save Book",
+      filters: [{ name: "Edu Book", extensions: ["edubook"] }],
+    });
+    if (!dialogPath) return;
+
+    setBusy(true);
+    try {
+      const manifest = await invoke<Manifest>("create_book", {
+        topic: topic().trim(),
+        dialogPath,
+      });
+      props.onBook(manifest);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function handleOpenBook() {
-    await open({
-      multiple: false,
+    setError("");
+    const result = await open({
       title: "Open Book",
+      filters: [{ name: "Edu Book", extensions: ["edubook"] }],
+      multiple: false,
     });
-    // File loading not yet implemented — format TBD
+    if (!result) return;
+    const path = Array.isArray(result) ? result[0] : result;
+
+    setBusy(true);
+    try {
+      const manifest = await invoke<Manifest>("load_book", { path });
+      props.onBook(manifest);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
   }
 
   return (
@@ -33,18 +72,20 @@ export default function WelcomeModal(props: Props) {
             placeholder="e.g. How black holes form, the history of the Roman Empire, how neural networks work…"
             value={topic()}
             onInput={(e) => setTopic(e.currentTarget.value)}
+            disabled={busy()}
           />
+          {error() && <p class="field-error" role="alert">{error()}</p>}
         </div>
 
         <div class="modal-actions">
           <button
             class="btn-primary"
-            disabled={topic().trim().length === 0}
-            onClick={() => props.onNext(topic().trim())}
+            disabled={topic().trim().length === 0 || busy()}
+            onClick={handleNext}
           >
-            Next
+            {busy() ? "Creating…" : "Next"}
           </button>
-          <button class="btn-text" onClick={handleOpenBook}>
+          <button class="btn-text" onClick={handleOpenBook} disabled={busy()}>
             Open Existing Book
           </button>
         </div>

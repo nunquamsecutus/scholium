@@ -1,4 +1,5 @@
 mod llm;
+mod manifest;
 mod settings;
 
 use settings::{LlmProvider, PublicSettings, Settings};
@@ -7,6 +8,7 @@ use tauri_plugin_cli::CliExt;
 
 pub struct AppState {
     pub settings: std::sync::Mutex<Settings>,
+    pub book_path: std::sync::Mutex<Option<std::path::PathBuf>>,
 }
 
 #[tauri::command]
@@ -22,14 +24,81 @@ async fn call_llm(
     let settings = state.settings.lock().unwrap().clone();
     match settings.provider {
         LlmProvider::Claude => {
-            let key = settings
-                .claude_api_key
-                .ok_or("Claude API key not configured — restart with --api-key or set ANTHROPIC_API_KEY")?;
+            let key = settings.claude_api_key.ok_or(
+                "Claude API key not configured — restart with --api-key or set ANTHROPIC_API_KEY",
+            )?;
             llm::call_claude(&key, messages).await
         }
         LlmProvider::Ollama => {
             llm::call_ollama(&settings.ollama_url, &settings.ollama_model, messages).await
         }
+    }
+}
+
+#[tauri::command]
+fn create_book(
+    state: tauri::State<'_, AppState>,
+    topic: String,
+    dialog_path: String,
+) -> Result<manifest::Manifest, String> {
+    let dialog_path = std::path::PathBuf::from(&dialog_path);
+
+    let stem = dialog_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .ok_or("invalid save path")?
+        .to_string();
+    let parent = dialog_path.parent().ok_or("invalid save path")?;
+
+    let book_dir = parent.join(&stem);
+    let manifest_path = book_dir.join(format!("{stem}.edubook"));
+
+    std::fs::create_dir_all(book_dir.join("chapters"))
+        .map_err(|e| format!("failed to create chapters dir: {e}"))?;
+    std::fs::create_dir_all(book_dir.join("images"))
+        .map_err(|e| format!("failed to create images dir: {e}"))?;
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let title = title_case(&topic);
+
+    let book = manifest::Manifest {
+        version: 1,
+        metadata: manifest::Metadata {
+            title,
+            topic,
+            created: now.clone(),
+            modified: now,
+            reading_level: None,
+            prior_knowledge: None,
+        },
+        lesson_plan: manifest::LessonPlan {
+            summary: String::new(),
+            chapters: vec![],
+        },
+    };
+
+    manifest::save(&book, &manifest_path)?;
+    *state.book_path.lock().unwrap() = Some(manifest_path);
+
+    Ok(book)
+}
+
+#[tauri::command]
+fn load_book(
+    state: tauri::State<'_, AppState>,
+    path: String,
+) -> Result<manifest::Manifest, String> {
+    let path = std::path::PathBuf::from(&path);
+    let book = manifest::load(&path)?;
+    *state.book_path.lock().unwrap() = Some(path);
+    Ok(book)
+}
+
+fn title_case(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
     }
 }
 
@@ -42,7 +111,6 @@ pub fn run() {
         .setup(|app| {
             let mut settings = Settings::default();
 
-            // CLI args take first priority.
             if let Ok(matches) = app.cli().matches() {
                 if let Some(arg) = matches.args.get("api-key") {
                     if let serde_json::Value::String(key) = &arg.value {
@@ -73,7 +141,6 @@ pub fn run() {
                 }
             }
 
-            // ANTHROPIC_API_KEY env var as fallback when no CLI key was given.
             if settings.claude_api_key.is_none() {
                 if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
                     if !key.is_empty() {
@@ -85,11 +152,17 @@ pub fn run() {
 
             app.manage(AppState {
                 settings: std::sync::Mutex::new(settings),
+                book_path: std::sync::Mutex::new(None),
             });
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![get_settings, call_llm])
+        .invoke_handler(tauri::generate_handler![
+            get_settings,
+            call_llm,
+            create_book,
+            load_book,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

@@ -4,6 +4,11 @@ import App from "./App";
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({
   open: vi.fn().mockResolvedValue(null),
+  save: vi.fn().mockResolvedValue(null),
+}));
+
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: vi.fn().mockResolvedValue(null),
 }));
 
 describe("App / WelcomeModal", () => {
@@ -22,10 +27,11 @@ describe("App / WelcomeModal", () => {
     expect(getByRole("button", { name: "Next" })).toBeDisabled();
   });
 
-  it("Next button enables once text is entered", async () => {
+  it("Next button enables once text is entered", () => {
     const { getByLabelText, getByRole } = render(() => <App />);
-    const textarea = getByLabelText("What do you want to learn?");
-    fireEvent.input(textarea, { target: { value: "How black holes form" } });
+    fireEvent.input(getByLabelText("What do you want to learn?"), {
+      target: { value: "How black holes form" },
+    });
     expect(getByRole("button", { name: "Next" })).not.toBeDisabled();
   });
 
