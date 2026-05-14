@@ -1,5 +1,6 @@
 mod llm;
 mod manifest;
+mod onboarding;
 mod settings;
 
 use settings::{LlmProvider, PublicSettings, Settings};
@@ -11,23 +12,18 @@ pub struct AppState {
     pub book_path: std::sync::Mutex<Option<std::path::PathBuf>>,
 }
 
-#[tauri::command]
-fn get_settings(state: tauri::State<'_, AppState>) -> PublicSettings {
-    PublicSettings::from(&*state.settings.lock().unwrap())
-}
+// ── Shared LLM dispatch ──────────────────────────────────────────────────────
 
-#[tauri::command]
-async fn call_llm(
-    state: tauri::State<'_, AppState>,
+async fn dispatch_llm(
+    settings: &Settings,
     messages: Vec<llm::LlmMessage>,
 ) -> Result<String, String> {
-    let settings = state.settings.lock().unwrap().clone();
     match settings.provider {
         LlmProvider::Claude => {
-            let key = settings.claude_api_key.ok_or(
+            let key = settings.claude_api_key.as_ref().ok_or(
                 "Claude API key not configured — restart with --api-key or set ANTHROPIC_API_KEY",
             )?;
-            llm::call_claude(&key, messages).await
+            llm::call_claude(key, messages).await
         }
         LlmProvider::Ollama => {
             llm::call_ollama(&settings.ollama_url, &settings.ollama_model, messages).await
@@ -35,11 +31,67 @@ async fn call_llm(
     }
 }
 
+// ── Settings ─────────────────────────────────────────────────────────────────
+
+#[tauri::command]
+fn get_settings(state: tauri::State<'_, AppState>) -> PublicSettings {
+    PublicSettings::from(&*state.settings.lock().unwrap())
+}
+
+// ── Generic LLM call (used by future chapter generation) ─────────────────────
+
+#[tauri::command]
+async fn call_llm(
+    state: tauri::State<'_, AppState>,
+    messages: Vec<llm::LlmMessage>,
+) -> Result<String, String> {
+    let settings = state.settings.lock().unwrap().clone();
+    dispatch_llm(&settings, messages).await
+}
+
+// ── Onboarding ───────────────────────────────────────────────────────────────
+
+#[tauri::command]
+async fn begin_onboarding(
+    state: tauri::State<'_, AppState>,
+    topic: String,
+) -> Result<String, String> {
+    let settings = state.settings.lock().unwrap().clone();
+    let messages = onboarding::build_initial_messages(&topic);
+    dispatch_llm(&settings, messages).await
+}
+
+#[tauri::command]
+async fn continue_onboarding(
+    state: tauri::State<'_, AppState>,
+    topic: String,
+    conversation: Vec<llm::LlmMessage>,
+) -> Result<String, String> {
+    let settings = state.settings.lock().unwrap().clone();
+    let messages = onboarding::build_continuation_messages(&topic, conversation);
+    dispatch_llm(&settings, messages).await
+}
+
+#[tauri::command]
+async fn generate_lesson_plan(
+    state: tauri::State<'_, AppState>,
+    topic: String,
+    conversation: Vec<llm::LlmMessage>,
+) -> Result<onboarding::GeneratedPlan, String> {
+    let settings = state.settings.lock().unwrap().clone();
+    let messages = onboarding::build_plan_messages(&topic, conversation);
+    let response = dispatch_llm(&settings, messages).await?;
+    onboarding::parse_plan(&response)
+}
+
+// ── Book management ───────────────────────────────────────────────────────────
+
 #[tauri::command]
 fn create_book(
     state: tauri::State<'_, AppState>,
     topic: String,
     dialog_path: String,
+    plan: onboarding::GeneratedPlan,
 ) -> Result<manifest::Manifest, String> {
     let dialog_path = std::path::PathBuf::from(&dialog_path);
 
@@ -68,12 +120,12 @@ fn create_book(
             topic,
             created: now.clone(),
             modified: now,
-            reading_level: None,
-            prior_knowledge: None,
+            reading_level: Some(plan.reading_level),
+            prior_knowledge: Some(plan.prior_knowledge),
         },
         lesson_plan: manifest::LessonPlan {
-            summary: String::new(),
-            chapters: vec![],
+            summary: plan.summary,
+            chapters: plan.lesson_plan.chapters,
         },
     };
 
@@ -94,6 +146,8 @@ fn load_book(
     Ok(book)
 }
 
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
 fn title_case(s: &str) -> String {
     let mut chars = s.chars();
     match chars.next() {
@@ -101,6 +155,8 @@ fn title_case(s: &str) -> String {
         Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
     }
 }
+
+// ── App entry point ───────────────────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -160,6 +216,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_settings,
             call_llm,
+            begin_onboarding,
+            continue_onboarding,
+            generate_lesson_plan,
             create_book,
             load_book,
         ])

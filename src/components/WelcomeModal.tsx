@@ -1,9 +1,10 @@
 import { createSignal } from "solid-js";
-import { open, save } from "@tauri-apps/plugin-dialog";
+import { open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import type { Manifest } from "../types/manifest";
 
 interface Props {
+  onTopic: (topic: string) => void;
   onBook: (manifest: Manifest) => void;
 }
 
@@ -11,28 +12,6 @@ export default function WelcomeModal(props: Props) {
   const [topic, setTopic] = createSignal("");
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal("");
-
-  async function handleNext() {
-    setError("");
-    const dialogPath = await save({
-      title: "Save Book",
-      filters: [{ name: "Edu Book", extensions: ["edubook"] }],
-    });
-    if (!dialogPath) return;
-
-    setBusy(true);
-    try {
-      const manifest = await invoke<Manifest>("create_book", {
-        topic: topic().trim(),
-        dialogPath,
-      });
-      props.onBook(manifest);
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setBusy(false);
-    }
-  }
 
   async function handleOpenBook() {
     setError("");
@@ -81,9 +60,9 @@ export default function WelcomeModal(props: Props) {
           <button
             class="btn-primary"
             disabled={topic().trim().length === 0 || busy()}
-            onClick={handleNext}
+            onClick={() => props.onTopic(topic().trim())}
           >
-            {busy() ? "Creating…" : "Next"}
+            Next
           </button>
           <button class="btn-text" onClick={handleOpenBook} disabled={busy()}>
             Open Existing Book

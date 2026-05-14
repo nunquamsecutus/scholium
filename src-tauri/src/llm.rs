@@ -9,11 +9,22 @@ pub struct LlmMessage {
 pub async fn call_claude(api_key: &str, messages: Vec<LlmMessage>) -> Result<String, String> {
     let client = reqwest::Client::new();
 
-    let body = serde_json::json!({
+    // Claude uses a top-level `system` field rather than a system role in messages.
+    let system = messages.iter()
+        .find(|m| m.role == "system")
+        .map(|m| m.content.clone());
+    let chat_messages: Vec<&LlmMessage> = messages.iter()
+        .filter(|m| m.role != "system")
+        .collect();
+
+    let mut body = serde_json::json!({
         "model": "claude-sonnet-4-6",
         "max_tokens": 8192,
-        "messages": messages,
+        "messages": chat_messages,
     });
+    if let Some(sys) = system {
+        body["system"] = serde_json::Value::String(sys);
+    }
 
     let res = client
         .post("https://api.anthropic.com/v1/messages")
@@ -74,10 +85,7 @@ mod tests {
 
     #[test]
     fn llm_message_serializes_correctly() {
-        let msg = LlmMessage {
-            role: "user".to_string(),
-            content: "Hello".to_string(),
-        };
+        let msg = LlmMessage { role: "user".to_string(), content: "Hello".to_string() };
         let json = serde_json::to_value(&msg).unwrap();
         assert_eq!(json["role"], "user");
         assert_eq!(json["content"], "Hello");
@@ -85,9 +93,21 @@ mod tests {
 
     #[test]
     fn ollama_url_trailing_slash_is_trimmed() {
-        // Verify the endpoint construction doesn't double-slash.
         let url = "http://localhost:11434/";
         let endpoint = format!("{}/api/chat", url.trim_end_matches('/'));
         assert_eq!(endpoint, "http://localhost:11434/api/chat");
+    }
+
+    #[test]
+    fn system_message_is_filtered_for_claude_body() {
+        let messages = vec![
+            LlmMessage { role: "system".to_string(), content: "You are helpful.".to_string() },
+            LlmMessage { role: "user".to_string(), content: "Hello".to_string() },
+        ];
+        let system = messages.iter().find(|m| m.role == "system").map(|m| m.content.clone());
+        let chat: Vec<&LlmMessage> = messages.iter().filter(|m| m.role != "system").collect();
+        assert_eq!(system, Some("You are helpful.".to_string()));
+        assert_eq!(chat.len(), 1);
+        assert_eq!(chat[0].role, "user");
     }
 }
