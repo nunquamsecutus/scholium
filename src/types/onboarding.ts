@@ -7,6 +7,7 @@ export interface ChatMessage {
 
 export interface GeneratedPlan {
   summary: string;
+  description: string;
   readingLevel: string;
   priorKnowledge: string;
   lessonPlan: LessonPlan;

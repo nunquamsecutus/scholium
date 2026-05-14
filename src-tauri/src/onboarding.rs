@@ -17,7 +17,8 @@ Based on our conversation, generate a lesson plan for the book. \
 Output ONLY a valid JSON object — no markdown, no code fences, no explanation. \
 Use this exact structure:\n\
 {\n  \
-  \"summary\": \"2-3 sentence overview of the book\",\n  \
+  \"summary\": \"2-3 sentence overview of the book's contents\",\n  \
+  \"description\": \"2-3 sentence back-cover style description written to entice a reader\",\n  \
   \"readingLevel\": \"beginner|intermediate|advanced\",\n  \
   \"priorKnowledge\": \"brief description of the assumed background\",\n  \
   \"chapters\": [\n    \
@@ -49,6 +50,7 @@ pub fn build_plan_messages(topic: &str, conversation: Vec<LlmMessage>) -> Vec<Ll
 #[serde(rename_all = "camelCase")]
 pub struct GeneratedPlan {
     pub summary: String,
+    pub description: String,
     pub reading_level: String,
     pub prior_knowledge: String,
     pub lesson_plan: LessonPlan,
@@ -57,6 +59,7 @@ pub struct GeneratedPlan {
 #[derive(Debug, Deserialize)]
 struct RawPlan {
     summary: String,
+    description: String,
     #[serde(rename = "readingLevel")]
     reading_level: String,
     #[serde(rename = "priorKnowledge")]
@@ -93,6 +96,7 @@ pub fn parse_plan(response: &str) -> Result<GeneratedPlan, String> {
     Ok(GeneratedPlan {
         reading_level: raw.reading_level,
         prior_knowledge: raw.prior_knowledge,
+        description: raw.description,
         lesson_plan: LessonPlan { summary: raw.summary.clone(), chapters },
         summary: raw.summary,
     })
@@ -128,19 +132,25 @@ fn slugify(s: &str) -> String {
 mod tests {
     use super::*;
 
-    #[test]
-    fn parse_plan_valid_json() {
-        let json = r#"{
+    fn plan_json(extra: &str) -> String {
+        format!(r#"{{
             "summary": "A book about black holes.",
+            "description": "Explore the universe's most extreme objects.",
             "readingLevel": "intermediate",
             "priorKnowledge": "Basic physics",
+            {extra}
             "chapters": [
-                {"title": "Stellar Evolution", "description": "How stars live and die."},
-                {"title": "Gravitational Collapse", "description": "The mechanics of collapse."}
+                {{"title": "Stellar Evolution", "description": "How stars live and die."}},
+                {{"title": "Gravitational Collapse", "description": "The mechanics of collapse."}}
             ]
-        }"#;
-        let plan = parse_plan(json).unwrap();
+        }}"#)
+    }
+
+    #[test]
+    fn parse_plan_valid_json() {
+        let plan = parse_plan(&plan_json("")).unwrap();
         assert_eq!(plan.reading_level, "intermediate");
+        assert_eq!(plan.description, "Explore the universe's most extreme objects.");
         assert_eq!(plan.lesson_plan.chapters.len(), 2);
         assert_eq!(plan.lesson_plan.chapters[0].id, "ch-01");
         assert_eq!(plan.lesson_plan.chapters[0].file, "chapters/01-stellar-evolution.md");
@@ -148,14 +158,14 @@ mod tests {
 
     #[test]
     fn parse_plan_strips_code_fences() {
-        let wrapped = "```json\n{\"summary\":\"s\",\"readingLevel\":\"beginner\",\"priorKnowledge\":\"none\",\"chapters\":[]}\n```";
+        let wrapped = "```json\n{\"summary\":\"s\",\"description\":\"d\",\"readingLevel\":\"beginner\",\"priorKnowledge\":\"none\",\"chapters\":[]}\n```";
         let plan = parse_plan(wrapped).unwrap();
         assert_eq!(plan.reading_level, "beginner");
     }
 
     #[test]
     fn parse_plan_extracts_json_from_prose() {
-        let messy = "Here is the plan:\n{\"summary\":\"s\",\"readingLevel\":\"advanced\",\"priorKnowledge\":\"lots\",\"chapters\":[]}\nDone.";
+        let messy = "Here is the plan:\n{\"summary\":\"s\",\"description\":\"d\",\"readingLevel\":\"advanced\",\"priorKnowledge\":\"lots\",\"chapters\":[]}\nDone.";
         let plan = parse_plan(messy).unwrap();
         assert_eq!(plan.reading_level, "advanced");
     }

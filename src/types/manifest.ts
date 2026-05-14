@@ -15,9 +15,12 @@ export interface LessonPlan {
 
 export interface Metadata {
   title: string;
+  subtitle?: string;
   topic: string;
+  prompt: string;
   created: string;
   modified: string;
+  description?: string;
   readingLevel?: string;
   priorKnowledge?: string;
 }

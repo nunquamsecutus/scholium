@@ -117,9 +117,12 @@ fn create_book(
         version: 1,
         metadata: manifest::Metadata {
             title,
+            subtitle: None,
+            prompt: topic.clone(),
             topic,
             created: now.clone(),
             modified: now,
+            description: Some(plan.description),
             reading_level: Some(plan.reading_level),
             prior_knowledge: Some(plan.prior_knowledge),
         },

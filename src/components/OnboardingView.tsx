@@ -193,7 +193,7 @@ function PlanPreview(props: PlanPreviewProps) {
   return (
     <div class="plan-preview">
       <h2 class="plan-preview-title">Your Lesson Plan</h2>
-      <p class="plan-summary">{props.plan.summary}</p>
+      <p class="plan-description">{props.plan.description}</p>
       <dl class="plan-meta">
         <dt>Level</dt><dd>{props.plan.readingLevel}</dd>
         <dt>Background</dt><dd>{props.plan.priorKnowledge}</dd>

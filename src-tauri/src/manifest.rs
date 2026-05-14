@@ -13,9 +13,14 @@ pub struct Manifest {
 #[serde(rename_all = "camelCase")]
 pub struct Metadata {
     pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subtitle: Option<String>,
     pub topic: String,
+    pub prompt: String,
     pub created: String,
     pub modified: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reading_level: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -69,9 +74,12 @@ mod tests {
             version: 1,
             metadata: Metadata {
                 title: "Black Holes".to_string(),
+                subtitle: None,
                 topic: "How black holes form".to_string(),
+                prompt: "How black holes form".to_string(),
                 created: "2026-05-13T00:00:00Z".to_string(),
                 modified: "2026-05-13T00:00:00Z".to_string(),
+                description: None,
                 reading_level: None,
                 prior_knowledge: None,
             },
@@ -109,8 +117,20 @@ mod tests {
     #[test]
     fn optional_fields_omitted_when_none() {
         let json = serde_json::to_string(&sample()).unwrap();
+        // Top-level keys that only appear in metadata
         assert!(!json.contains("readingLevel"));
         assert!(!json.contains("priorKnowledge"));
+        assert!(!json.contains("subtitle"));
+        // description also appears in Chapter, so check the metadata object directly
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(v["metadata"]["description"].is_null());
+    }
+
+    #[test]
+    fn prompt_and_title_are_present() {
+        let json = serde_json::to_string(&sample()).unwrap();
+        assert!(json.contains("\"prompt\""));
+        assert!(json.contains("\"title\""));
     }
 
     #[test]

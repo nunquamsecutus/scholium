@@ -427,10 +427,11 @@ body {
   color: var(--color-primary);
 }
 
-.plan-summary {
+.plan-description {
   color: #a0aec0;
   line-height: 1.7;
   font-size: 0.95rem;
+  font-style: italic;
 }
 
 .plan-meta {

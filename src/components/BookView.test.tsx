@@ -8,6 +8,7 @@ const emptyManifest: Manifest = {
   metadata: {
     title: "Black Holes",
     topic: "How black holes form",
+    prompt: "How black holes form",
     created: "2026-05-13T00:00:00Z",
     modified: "2026-05-13T00:00:00Z",
   },
