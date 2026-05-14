@@ -1,3 +1,4 @@
+mod chapter;
 mod llm;
 mod manifest;
 mod onboarding;
@@ -82,6 +83,101 @@ async fn generate_lesson_plan(
     let messages = onboarding::build_plan_messages(&topic, conversation);
     let response = dispatch_llm(&settings, messages).await?;
     onboarding::parse_plan(&response)
+}
+
+// ── Chapter generation ────────────────────────────────────────────────────────
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GenerateChapterResult {
+    pub content: String,
+    pub manifest: manifest::Manifest,
+}
+
+#[tauri::command]
+async fn generate_chapter(
+    state: tauri::State<'_, AppState>,
+    chapter_id: String,
+) -> Result<GenerateChapterResult, String> {
+    let book_path = state
+        .book_path
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("no book is open")?;
+
+    let mut book = manifest::load(&book_path)?;
+
+    let idx = book
+        .lesson_plan
+        .chapters
+        .iter()
+        .position(|ch| ch.id == chapter_id)
+        .ok_or_else(|| format!("chapter {chapter_id} not found"))?;
+
+    // Mark as in-progress before the LLM call so a crash leaves a visible signal.
+    book.lesson_plan.chapters[idx].status = manifest::ChapterStatus::Generating;
+    manifest::save(&book, &book_path)?;
+
+    let messages = chapter::build_messages(&book, &chapter_id)?;
+    let settings = state.settings.lock().unwrap().clone();
+    let content = match dispatch_llm(&settings, messages).await {
+        Ok(c) => c,
+        Err(e) => {
+            // Roll back the status so the chapter stays actionable.
+            book.lesson_plan.chapters[idx].status = manifest::ChapterStatus::Planned;
+            manifest::save(&book, &book_path).ok();
+            return Err(e);
+        }
+    };
+
+    let chapter_file = book.lesson_plan.chapters[idx].file.clone();
+    let chapter_path = book_path
+        .parent()
+        .ok_or("invalid book path")?
+        .join(&chapter_file);
+
+    if let Some(dir) = chapter_path.parent() {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("failed to create chapter directory: {e}"))?;
+    }
+    std::fs::write(&chapter_path, &content)
+        .map_err(|e| format!("failed to write chapter file: {e}"))?;
+
+    book.lesson_plan.chapters[idx].status = manifest::ChapterStatus::Generated;
+    book.metadata.modified = chrono::Utc::now().to_rfc3339();
+    manifest::save(&book, &book_path)?;
+
+    Ok(GenerateChapterResult { content, manifest: book })
+}
+
+#[tauri::command]
+fn read_chapter(
+    state: tauri::State<'_, AppState>,
+    chapter_id: String,
+) -> Result<String, String> {
+    let book_path = state
+        .book_path
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("no book is open")?;
+
+    let book = manifest::load(&book_path)?;
+    let chapter = book
+        .lesson_plan
+        .chapters
+        .iter()
+        .find(|ch| ch.id == chapter_id)
+        .ok_or_else(|| format!("chapter {chapter_id} not found"))?;
+
+    let chapter_path = book_path
+        .parent()
+        .ok_or("invalid book path")?
+        .join(&chapter.file);
+
+    std::fs::read_to_string(&chapter_path)
+        .map_err(|e| format!("failed to read chapter: {e}"))
 }
 
 // ── Book management ───────────────────────────────────────────────────────────
@@ -224,6 +320,8 @@ pub fn run() {
             generate_lesson_plan,
             create_book,
             load_book,
+            generate_chapter,
+            read_chapter,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

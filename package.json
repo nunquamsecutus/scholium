@@ -17,12 +17,15 @@
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-dialog": "^2.7.1",
     "@tauri-apps/plugin-opener": "^2",
+    "dompurify": "^3.4.3",
+    "marked": "^18.0.3",
     "solid-js": "^1.9.3"
   },
   "devDependencies": {
     "@solidjs/testing-library": "^0.8.10",
     "@tauri-apps/cli": "^2",
     "@testing-library/jest-dom": "^6.9.1",
+    "@types/dompurify": "^3.0.5",
     "jsdom": "^29.1.1",
     "typescript": "~5.6.2",
     "vite": "^6.0.3",
