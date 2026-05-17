@@ -22,7 +22,10 @@ pub fn build_messages(manifest: &Manifest, chapter_id: &str) -> Result<Vec<LlmMe
         .chapters
         .iter()
         .enumerate()
-        .map(|(i, ch)| format!("{}. {} — {}", i + 1, ch.title, ch.description))
+        .map(|(i, ch)| match &ch.description {
+            Some(desc) => format!("{}. {} — {}", i + 1, ch.title, desc),
+            None => format!("{}. {}", i + 1, ch.title),
+        })
         .collect::<Vec<_>>()
         .join("\n");
 
@@ -45,13 +48,19 @@ pub fn build_messages(manifest: &Manifest, chapter_id: &str) -> Result<Vec<LlmMe
         outline = outline,
     );
 
-    let user = format!(
-        "Write Chapter {n}: {title}\n\n{description}\n\n\
-         Aim for roughly 1500–2500 words. Be thorough.",
-        n = chapter_num,
-        title = chapter.title,
-        description = chapter.description,
-    );
+    let user = match &chapter.description {
+        Some(desc) => format!(
+            "Write Chapter {n}: {title}\n\n{desc}\n\n\
+             Aim for roughly 1500–2500 words. Be thorough.",
+            n = chapter_num,
+            title = chapter.title,
+        ),
+        None => format!(
+            "Write Chapter {n}: {title}\n\nAim for roughly 1500–2500 words. Be thorough.",
+            n = chapter_num,
+            title = chapter.title,
+        ),
+    };
 
     Ok(vec![
         LlmMessage { role: "system".to_string(), content: system },
@@ -84,15 +93,15 @@ mod tests {
                     Chapter {
                         id: "ch-01".to_string(),
                         title: "Stellar Evolution".to_string(),
-                        description: "How stars live and die.".to_string(),
-                        file: "chapters/01-stellar-evolution.md".to_string(),
+                        description: Some("How stars live and die.".to_string()),
+                        file: "chapters/01-stellar-evolution.edupage".to_string(),
                         status: ChapterStatus::Planned,
                     },
                     Chapter {
                         id: "ch-02".to_string(),
                         title: "Gravitational Collapse".to_string(),
-                        description: "The mechanics of collapse.".to_string(),
-                        file: "chapters/02-gravitational-collapse.md".to_string(),
+                        description: Some("The mechanics of collapse.".to_string()),
+                        file: "chapters/02-gravitational-collapse.edupage".to_string(),
                         status: ChapterStatus::Planned,
                     },
                 ],

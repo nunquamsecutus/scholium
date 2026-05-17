@@ -1,5 +1,7 @@
 import type { LessonPlan } from "./manifest";
 
+export type ReadingLevel = "child" | "teen" | "adult" | "academic";
+
 export interface ChatMessage {
   role: "user" | "assistant";
   content: string;
@@ -8,7 +10,6 @@ export interface ChatMessage {
 export interface GeneratedPlan {
   summary: string;
   description: string;
-  readingLevel: string;
   priorKnowledge: string;
   lessonPlan: LessonPlan;
 }

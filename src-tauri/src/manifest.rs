@@ -39,7 +39,8 @@ pub struct LessonPlan {
 pub struct Chapter {
     pub id: String,
     pub title: String,
-    pub description: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     pub file: String,
     pub status: ChapterStatus,
 }
@@ -88,8 +89,8 @@ mod tests {
                 chapters: vec![Chapter {
                     id: "ch-01".to_string(),
                     title: "Stellar Evolution".to_string(),
-                    description: "How stars live and die.".to_string(),
-                    file: "chapters/01-stellar-evolution.md".to_string(),
+                    description: None,
+                    file: "chapters/01-stellar-evolution.edupage".to_string(),
                     status: ChapterStatus::Planned,
                 }],
             },
@@ -117,13 +118,10 @@ mod tests {
     #[test]
     fn optional_fields_omitted_when_none() {
         let json = serde_json::to_string(&sample()).unwrap();
-        // Top-level keys that only appear in metadata
         assert!(!json.contains("readingLevel"));
         assert!(!json.contains("priorKnowledge"));
         assert!(!json.contains("subtitle"));
-        // description also appears in Chapter, so check the metadata object directly
-        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert!(v["metadata"]["description"].is_null());
+        assert!(!json.contains("description"));
     }
 
     #[test]
@@ -149,6 +147,6 @@ mod tests {
         std::fs::remove_file(&path).ok();
         assert_eq!(loaded.version, original.version);
         assert_eq!(loaded.metadata.topic, original.metadata.topic);
-        assert_eq!(loaded.lesson_plan.chapters[0].id, "ch-01");
+        assert_eq!(loaded.lesson_plan.chapters[0].title, "Stellar Evolution");
     }
 }

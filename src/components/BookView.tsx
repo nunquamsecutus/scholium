@@ -27,6 +27,9 @@ export default function BookView(props: Props) {
   const selectedChapter = () =>
     manifest().lessonPlan.chapters.find((ch) => ch.id === selectedId()) ?? null;
 
+  const nextPlannedId = () =>
+    manifest().lessonPlan.chapters.find((ch) => ch.status === "planned")?.id ?? null;
+
   const currentHtml = () =>
     selectedId() ? contentCache()[selectedId()!] ?? null : null;
 
@@ -82,7 +85,9 @@ export default function BookView(props: Props) {
   return (
     <div class="book-shell">
       <aside class="book-sidebar">
-        <h2 class="book-title">{manifest().metadata.title}</h2>
+        <button class="book-title" onClick={() => setSelectedId(null)}>
+          {manifest().metadata.title}
+        </button>
         <nav class="chapter-list" aria-label="Chapters">
           <ol>
             <For each={manifest().lessonPlan.chapters}>
@@ -108,7 +113,7 @@ export default function BookView(props: Props) {
 
         <Switch>
           <Match when={!selectedChapter()}>
-            <BookOverview manifest={manifest()} onGenerate={generateChapter} generating={generating()} />
+            <BookOverview manifest={manifest()} />
           </Match>
 
           <Match when={selectedChapter()?.status === "planned"}>
@@ -116,6 +121,7 @@ export default function BookView(props: Props) {
               chapter={selectedChapter()!}
               onGenerate={() => generateChapter(selectedChapter()!.id)}
               generating={generating()}
+              locked={selectedChapter()!.id !== nextPlannedId()}
             />
           </Match>
 
@@ -140,14 +146,7 @@ export default function BookView(props: Props) {
   );
 }
 
-function BookOverview(props: {
-  manifest: Manifest;
-  onGenerate: (id: string) => void;
-  generating: boolean;
-}) {
-  const firstPlanned = () =>
-    props.manifest.lessonPlan.chapters.find((ch) => ch.status === "planned");
-
+function BookOverview(props: { manifest: Manifest }) {
   return (
     <div class="book-overview">
       <h1 class="overview-title">{props.manifest.metadata.title}</h1>
@@ -157,19 +156,6 @@ function BookOverview(props: {
       <Show when={props.manifest.metadata.description}>
         <p class="overview-description">{props.manifest.metadata.description}</p>
       </Show>
-      <p class="overview-meta">
-        {props.manifest.lessonPlan.chapters.length} chapters ·{" "}
-        {props.manifest.metadata.readingLevel ?? "general"} level
-      </p>
-      <Show when={firstPlanned()}>
-        <button
-          class="btn-primary overview-start"
-          disabled={props.generating}
-          onClick={() => props.onGenerate(firstPlanned()!.id)}
-        >
-          {props.generating ? "Generating…" : `Start — Generate "${firstPlanned()!.title}"`}
-        </button>
-      </Show>
     </div>
   );
 }
@@ -178,14 +164,24 @@ function ChapterPlaceholder(props: {
   chapter: Chapter;
   onGenerate: () => void;
   generating: boolean;
+  locked: boolean;
 }) {
   return (
     <div class="chapter-placeholder">
       <h2>{props.chapter.title}</h2>
       <p class="placeholder-description">{props.chapter.description}</p>
-      <button class="btn-primary" disabled={props.generating} onClick={props.onGenerate}>
-        {props.generating ? "Generating…" : "Generate Chapter"}
-      </button>
+      <Show
+        when={!props.locked}
+        fallback={
+          <p class="chapter-locked-message">
+            Generate the previous chapters before accessing this one.
+          </p>
+        }
+      >
+        <button class="btn-primary" disabled={props.generating} onClick={props.onGenerate}>
+          {props.generating ? "Generating…" : "Generate Chapter"}
+        </button>
+      </Show>
     </div>
   );
 }

@@ -24,15 +24,13 @@ const baseManifest: Manifest = {
       {
         id: "ch-01",
         title: "Stellar Evolution",
-        description: "How stars live and die.",
-        file: "chapters/01-stellar-evolution.md",
+        file: "chapters/01-stellar-evolution.edupage",
         status: "planned",
       },
       {
         id: "ch-02",
         title: "Gravitational Collapse",
-        description: "The mechanics of collapse.",
-        file: "chapters/02-gravitational-collapse.md",
+        file: "chapters/02-gravitational-collapse.edupage",
         status: "generated",
       },
     ],
@@ -43,9 +41,18 @@ describe("BookView", () => {
   it("shows the book title in the sidebar", () => {
     const { getByRole } = render(() => <BookView manifest={baseManifest} />);
     expect(getByRole("navigation", { name: "Chapters" })).toBeInTheDocument();
-    // Title appears in both sidebar and overview — check the sidebar heading specifically
     const sidebar = document.querySelector(".book-sidebar");
     expect(sidebar?.textContent).toContain("Black Holes");
+  });
+
+  it("clicking the book title returns to the overview", () => {
+    const { getByText, getByRole } = render(() => <BookView manifest={baseManifest} />);
+    // Navigate away from overview
+    getByText("Stellar Evolution").closest("button")!.click();
+    expect(getByRole("button", { name: "Generate Chapter" })).toBeInTheDocument();
+    // Click title to go back
+    (document.querySelector(".book-title") as HTMLElement).click();
+    expect(getByText("A journey into the universe's most extreme objects.")).toBeInTheDocument();
   });
 
   it("renders chapter titles in the sidebar", () => {
@@ -59,9 +66,24 @@ describe("BookView", () => {
     expect(getByText("A journey into the universe's most extreme objects.")).toBeInTheDocument();
   });
 
-  it("shows Generate Chapter button for planned chapter via overview start button", () => {
-    const { getByRole } = render(() => <BookView manifest={baseManifest} />);
-    expect(getByRole("button", { name: /Start.*Stellar Evolution/ })).toBeInTheDocument();
+  it("shows Generate Chapter button when the next planned chapter is selected", () => {
+    const { getByText, getByRole } = render(() => <BookView manifest={baseManifest} />);
+    getByText("Stellar Evolution").closest("button")!.click();
+    expect(getByRole("button", { name: "Generate Chapter" })).toBeInTheDocument();
+  });
+
+  it("shows locked message when a planned chapter is selected but is not the next planned", () => {
+    const allPlanned: Manifest = {
+      ...baseManifest,
+      lessonPlan: {
+        ...baseManifest.lessonPlan,
+        chapters: baseManifest.lessonPlan.chapters.map((ch) => ({ ...ch, status: "planned" as const })),
+      },
+    };
+    const { getByText, queryByRole } = render(() => <BookView manifest={allPlanned} />);
+    getByText("Gravitational Collapse").closest("button")!.click();
+    expect(queryByRole("button", { name: "Generate Chapter" })).not.toBeInTheDocument();
+    expect(getByText(/Generate the previous chapters/)).toBeInTheDocument();
   });
 
   it("applies status class to chapter items", () => {

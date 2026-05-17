@@ -1,4 +1,5 @@
 mod chapter;
+mod edupage;
 mod llm;
 mod manifest;
 mod onboarding;
@@ -56,9 +57,10 @@ async fn call_llm(
 async fn begin_onboarding(
     state: tauri::State<'_, AppState>,
     topic: String,
+    reading_level: String,
 ) -> Result<String, String> {
     let settings = state.settings.lock().unwrap().clone();
-    let messages = onboarding::build_initial_messages(&topic);
+    let messages = onboarding::build_initial_messages(&topic, &reading_level);
     dispatch_llm(&settings, messages).await
 }
 
@@ -66,10 +68,11 @@ async fn begin_onboarding(
 async fn continue_onboarding(
     state: tauri::State<'_, AppState>,
     topic: String,
+    reading_level: String,
     conversation: Vec<llm::LlmMessage>,
 ) -> Result<String, String> {
     let settings = state.settings.lock().unwrap().clone();
-    let messages = onboarding::build_continuation_messages(&topic, conversation);
+    let messages = onboarding::build_continuation_messages(&topic, &reading_level, conversation);
     dispatch_llm(&settings, messages).await
 }
 
@@ -77,10 +80,11 @@ async fn continue_onboarding(
 async fn generate_lesson_plan(
     state: tauri::State<'_, AppState>,
     topic: String,
+    reading_level: String,
     conversation: Vec<llm::LlmMessage>,
 ) -> Result<onboarding::GeneratedPlan, String> {
     let settings = state.settings.lock().unwrap().clone();
-    let messages = onboarding::build_plan_messages(&topic, conversation);
+    let messages = onboarding::build_plan_messages(&topic, &reading_level, conversation);
     let response = dispatch_llm(&settings, messages).await?;
     onboarding::parse_plan(&response)
 }
@@ -141,7 +145,13 @@ async fn generate_chapter(
         std::fs::create_dir_all(dir)
             .map_err(|e| format!("failed to create chapter directory: {e}"))?;
     }
-    std::fs::write(&chapter_path, &content)
+    let page = edupage::create(
+        &chapter_id,
+        &book.lesson_plan.chapters[idx].title,
+        book.lesson_plan.chapters[idx].description.as_deref(),
+        &content,
+    );
+    std::fs::write(&chapter_path, &page)
         .map_err(|e| format!("failed to write chapter file: {e}"))?;
 
     book.lesson_plan.chapters[idx].status = manifest::ChapterStatus::Generated;
@@ -176,8 +186,9 @@ fn read_chapter(
         .ok_or("invalid book path")?
         .join(&chapter.file);
 
-    std::fs::read_to_string(&chapter_path)
-        .map_err(|e| format!("failed to read chapter: {e}"))
+    let raw = std::fs::read_to_string(&chapter_path)
+        .map_err(|e| format!("failed to read chapter: {e}"))?;
+    edupage::reconstruct(&raw)
 }
 
 // ── Book management ───────────────────────────────────────────────────────────
@@ -188,6 +199,7 @@ fn create_book(
     topic: String,
     dialog_path: String,
     plan: onboarding::GeneratedPlan,
+    reading_level: String,
 ) -> Result<manifest::Manifest, String> {
     let dialog_path = std::path::PathBuf::from(&dialog_path);
 
@@ -219,7 +231,7 @@ fn create_book(
             created: now.clone(),
             modified: now,
             description: Some(plan.description),
-            reading_level: Some(plan.reading_level),
+            reading_level: Some(reading_level),
             prior_knowledge: Some(plan.prior_knowledge),
         },
         lesson_plan: manifest::LessonPlan {

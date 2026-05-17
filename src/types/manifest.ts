@@ -3,7 +3,7 @@ export type ChapterStatus = "planned" | "generating" | "generated";
 export interface Chapter {
   id: string;
   title: string;
-  description: string;
+  description?: string;
   file: string;
   status: ChapterStatus;
 }
