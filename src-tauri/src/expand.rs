@@ -90,6 +90,69 @@ pub fn build_endnote_messages(
     ]
 }
 
+/// Build messages for an appendix-length expansion: a multi-paragraph chapter
+/// that ends with a "Further reading" section of recommendations at the
+/// reader's level.
+pub fn build_appendix_messages(
+    selection: &str,
+    context: &str,
+    reading_level: &str,
+    book_topic: Option<&str>,
+) -> Vec<LlmMessage> {
+    let topic_clause = match book_topic {
+        Some(t) if !t.is_empty() => format!("\nThe book's subject is: {t}.\n"),
+        _ => String::new(),
+    };
+
+    let system = format!(
+        "You write appendix chapters expanding on highlighted topics for a \
+         learner reading at {} reading level.{}\n\n\
+         Given a highlighted passage and the paragraph it appears in, write \
+         a multi-paragraph appendix that explores the topic in depth.\n\n\
+         The appendix MUST end with a \"## Further reading\" section \
+         recommending 2 to 4 books or academic papers appropriate for the \
+         reader's level. Annotate each recommendation with one sentence \
+         describing why it's worth reading.\n\n\
+         Rules:\n\
+         - Markdown format. Use ## for section headings inside the appendix.\n\
+         - 3 to 6 paragraphs of body content before the recommendations.\n\
+         - Do NOT include an H1 title — the chapter title is set elsewhere.\n\
+         - The final section MUST be \"## Further reading\" with annotated \
+           recommendations.\n\
+         - Pitch language to the reader's level.",
+        reading_level_description(reading_level),
+        topic_clause,
+    );
+
+    let user = format!(
+        "Highlighted passage: {selection}\n\nSurrounding paragraph: {context}\n\nWrite the appendix."
+    );
+
+    vec![
+        LlmMessage { role: "system".to_string(), content: system },
+        LlmMessage { role: "user".to_string(), content: user },
+    ]
+}
+
+/// Strip code fences and a leading H1 (the chapter title is set externally
+/// via the manifest, so an H1 inside the body is redundant noise).
+pub fn clean_appendix_response(raw: &str) -> String {
+    let mut s = raw.trim().to_string();
+    for prefix in ["```markdown\n", "```md\n", "```\n"] {
+        if let Some(rest) = s.strip_prefix(prefix) {
+            if let Some(end) = rest.rfind("```") {
+                s = rest[..end].trim_end().to_string();
+                break;
+            }
+        }
+    }
+    let lines: Vec<&str> = s.lines().collect();
+    if lines.first().map(|l| l.starts_with("# ")).unwrap_or(false) {
+        s = lines[1..].join("\n").trim_start().to_string();
+    }
+    s.trim().to_string()
+}
+
 pub fn clean_endnote_response(raw: &str) -> String {
     let mut s = raw.trim().to_string();
     for p in ["Endnote:", "endnote:", "Note:", "note:"] {
@@ -217,5 +280,45 @@ mod tests {
     #[test]
     fn clean_endnote_strips_prefix() {
         assert_eq!(clean_endnote_response("Endnote: a thing."), "a thing.");
+    }
+
+    #[test]
+    fn appendix_prompt_requires_further_reading_section() {
+        let msgs = build_appendix_messages("x", "y", "adult", None);
+        let system = msgs.iter().find(|m| m.role == "system").unwrap();
+        assert!(system.content.contains("Further reading"));
+    }
+
+    #[test]
+    fn appendix_prompt_includes_selection_and_context() {
+        let msgs = build_appendix_messages("Hawking radiation", "When black holes evaporate.", "adult", None);
+        let user = msgs.iter().find(|m| m.role == "user").unwrap();
+        assert!(user.content.contains("Hawking radiation"));
+        assert!(user.content.contains("When black holes evaporate"));
+    }
+
+    #[test]
+    fn appendix_prompt_forbids_h1_inside_body() {
+        let msgs = build_appendix_messages("x", "y", "adult", None);
+        let system = msgs.iter().find(|m| m.role == "system").unwrap();
+        assert!(system.content.contains("H1"));
+    }
+
+    #[test]
+    fn clean_appendix_strips_code_fence() {
+        let raw = "```markdown\nSome content here.\n```";
+        assert_eq!(clean_appendix_response(raw), "Some content here.");
+    }
+
+    #[test]
+    fn clean_appendix_strips_leading_h1() {
+        let raw = "# Big Title\n\nThe body of the appendix.";
+        assert_eq!(clean_appendix_response(raw), "The body of the appendix.");
+    }
+
+    #[test]
+    fn clean_appendix_passes_through_plain_markdown() {
+        let raw = "## Section\n\nA paragraph.\n\n## Further reading\n\n- A book.";
+        assert_eq!(clean_appendix_response(raw), raw);
     }
 }

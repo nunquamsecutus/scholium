@@ -29,6 +29,10 @@ interface ChapterContent {
   notes: NoteFromBackend[];
 }
 
+interface AppendixResult extends ChapterContent {
+  manifest: Manifest;
+}
+
 interface Props {
   manifest: Manifest;
 }
@@ -52,14 +56,17 @@ function labelForNote(note: NoteFromBackend | undefined, id: string): string {
   return `${note.type} of ${note.word}`;
 }
 
-// `[^*N]` = definition, `[^†N]` = footnote, `[^‡N]` = endnote. Future
-// appendix marker (`A`) will slot in here.
-const ANCHOR_RE = /\[\^([*†‡])(\d+)\]/g;
+// `[^*N]` = definition, `[^†N]` = footnote, `[^‡N]` = endnote,
+// `[^A<seq>]` = appendix cross-reference (link to chapter `ap-<seq>`).
+const ANCHOR_RE = /\[\^([*†‡A])(\d+)\]/g;
 
 function renderMarkdown(md: string, notes: NoteFromBackend[]): string {
   const html = DOMPurify.sanitize(marked.parse(md) as string);
   const byId = new Map<number, NoteFromBackend>(notes.map((n) => [n.id, n]));
-  let processed = html.replace(ANCHOR_RE, (_, _marker, id) => {
+  let processed = html.replace(ANCHOR_RE, (_, marker, id) => {
+    if (marker === "A") {
+      return `<a class="appendix-ref" data-appendix-seq="${id}" role="link" tabindex="0">(see Appendix ${id})</a>`;
+    }
     const note = byId.get(Number(id));
     const type = note?.type ?? "unknown";
     const display = displayForNote(note?.type, id);
@@ -290,6 +297,18 @@ export default function BookView(props: Props) {
     if (!article) return;
     const onClick = (e: MouseEvent) => {
       const target = e.target as HTMLElement | null;
+
+      const appRef = target?.closest(".appendix-ref") as HTMLElement | null;
+      if (appRef) {
+        e.preventDefault();
+        const seq = appRef.dataset.appendixSeq;
+        if (seq) {
+          const ch = manifest().lessonPlan.chapters.find((c) => c.id === `ap-${seq}`);
+          if (ch) selectChapter(ch);
+        }
+        return;
+      }
+
       const anchor = target?.closest(".note-anchor") as HTMLElement | null;
       if (!anchor) return;
       const noteId = Number(anchor.dataset.noteId);
@@ -408,6 +427,34 @@ export default function BookView(props: Props) {
         occurrenceIndex: occurrence,
         context,
       });
+      setContentCache((c) => ({ ...c, [chapterId]: renderMarkdown(result.content, result.notes) }));
+      setChapterNotes((m) => ({ ...m, [chapterId]: result.notes }));
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function handleAppendix(phrase: string, range: Range) {
+    const chapterId = selectedId();
+    const article = articleRef();
+    if (!chapterId || !article) return;
+
+    const occurrence = occurrenceIndex(range, article, phrase);
+    if (occurrence < 0) {
+      setError(`Could not locate "${phrase}" in the chapter source.`);
+      return;
+    }
+
+    const context = paragraphContext(range, article);
+
+    try {
+      const result = await invoke<AppendixResult>("add_appendix", {
+        chapterId,
+        selection: phrase,
+        occurrenceIndex: occurrence,
+        context,
+      });
+      setManifest(result.manifest);
       setContentCache((c) => ({ ...c, [chapterId]: renderMarkdown(result.content, result.notes) }));
       setChapterNotes((m) => ({ ...m, [chapterId]: result.notes }));
     } catch (e) {
@@ -578,6 +625,7 @@ export default function BookView(props: Props) {
           onDefine={handleDefine}
           onFootnote={handleFootnote}
           onEndnote={handleEndnote}
+          onAppendix={handleAppendix}
         />
 
         <Show when={activeFootnote()}>

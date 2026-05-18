@@ -6,6 +6,7 @@ interface Props {
   onDefine?: (word: string, range: Range) => void;
   onFootnote?: (phrase: string, range: Range) => void;
   onEndnote?: (phrase: string, range: Range) => void;
+  onAppendix?: (phrase: string, range: Range) => void;
 }
 
 type Mode = "primary" | "expand";
@@ -73,6 +74,13 @@ export default function SelectionToolbar(props: Props) {
     props.onEndnote?.(p, r);
   }
 
+  function appendix() {
+    const p = phrase();
+    const r = range();
+    if (!p || !r) return;
+    props.onAppendix?.(p, r);
+  }
+
   onMount(() => {
     document.addEventListener("selectionchange", update);
     onCleanup(() => document.removeEventListener("selectionchange", update));
@@ -122,6 +130,9 @@ export default function SelectionToolbar(props: Props) {
           </button>
           <button type="button" class="selection-action" onClick={endnote}>
             Endnote
+          </button>
+          <button type="button" class="selection-action" onClick={appendix}>
+            Appendix
           </button>
         </Show>
       </div>

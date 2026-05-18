@@ -371,6 +371,124 @@ async fn add_endnote(
     })
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppendixResult {
+    pub content: String,
+    pub notes: Vec<edupage::NoteWithBody>,
+    pub manifest: manifest::Manifest,
+}
+
+fn appendix_title_from(seq: u32, selection: &str) -> String {
+    let trimmed = selection.trim();
+    let snippet: String = if trimmed.chars().count() > 40 {
+        let mut s: String = trimmed.chars().take(40).collect();
+        s.push('…');
+        s
+    } else {
+        trimmed.to_string()
+    };
+    format!("Appendix {}: {}", seq, snippet)
+}
+
+#[tauri::command]
+async fn add_appendix(
+    state: tauri::State<'_, AppState>,
+    chapter_id: String,
+    selection: String,
+    occurrence_index: u32,
+    context: String,
+) -> Result<AppendixResult, String> {
+    if selection.trim().is_empty() {
+        return Err("empty selection".to_string());
+    }
+    if context.trim().is_empty() {
+        return Err("empty context".to_string());
+    }
+
+    let book_path = state
+        .book_path
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("no book is open")?;
+    let mut book = manifest::load(&book_path)?;
+    let reading_level = book
+        .metadata
+        .reading_level
+        .as_deref()
+        .unwrap_or("adult")
+        .to_string();
+    let topic = book.metadata.topic.clone();
+
+    // Sequence number is one past the count of existing chapters whose title
+    // starts with "Appendix" — deletions are not supported yet, so this
+    // produces a stable monotonically increasing number per book.
+    let seq = book
+        .lesson_plan
+        .chapters
+        .iter()
+        .filter(|c| c.title.starts_with("Appendix"))
+        .count() as u32
+        + 1;
+
+    let settings = state.settings.lock().unwrap().clone();
+    let topic_ref = Some(topic.as_str()).filter(|s| !s.is_empty());
+    let messages =
+        expand::build_appendix_messages(&selection, &context, &reading_level, topic_ref);
+    let raw_llm = dispatch_llm(&settings, messages).await?;
+    let content = expand::clean_appendix_response(&raw_llm);
+    if content.is_empty() {
+        return Err("model returned an empty appendix".to_string());
+    }
+
+    let appendix_id = format!("ap-{}", seq);
+    let appendix_title = appendix_title_from(seq, &selection);
+    let appendix_file = format!("chapters/{}.edupage", appendix_id);
+
+    let book_dir = book_path.parent().ok_or("invalid book path")?.to_path_buf();
+    let appendix_path = book_dir.join(&appendix_file);
+    if let Some(parent) = appendix_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("failed to create chapters dir: {e}"))?;
+    }
+    let edupage_raw = edupage::create(&appendix_id, &appendix_title, None, &content);
+    std::fs::write(&appendix_path, &edupage_raw)
+        .map_err(|e| format!("failed to write appendix file: {e}"))?;
+
+    book.lesson_plan.chapters.push(manifest::Chapter {
+        id: appendix_id.clone(),
+        title: appendix_title.clone(),
+        description: None,
+        file: appendix_file.clone(),
+        status: manifest::ChapterStatus::Generated,
+    });
+    book.metadata.modified = chrono::Utc::now().to_rfc3339();
+    manifest::save(&book, &book_path)?;
+
+    // Now revise the source chapter to include the cross-reference.
+    let source_chapter = book
+        .lesson_plan
+        .chapters
+        .iter()
+        .find(|c| c.id == chapter_id)
+        .ok_or_else(|| format!("chapter {chapter_id} not found"))?;
+    let source_path = book_dir.join(&source_chapter.file);
+    let source_raw = std::fs::read_to_string(&source_path)
+        .map_err(|e| format!("failed to read source chapter: {e}"))?;
+    let new_source_raw =
+        edupage::insert_appendix_ref(&source_raw, seq, &selection, occurrence_index)?;
+    std::fs::write(&source_path, &new_source_raw)
+        .map_err(|e| format!("failed to write source chapter: {e}"))?;
+
+    let page = edupage::read(&new_source_raw)?;
+    Ok(AppendixResult {
+        content: page.content,
+        notes: page.notes,
+        manifest: book,
+    })
+}
+
 #[tauri::command]
 fn delete_note(
     state: tauri::State<'_, AppState>,
@@ -566,6 +684,7 @@ pub fn run() {
             define_word,
             add_footnote,
             add_endnote,
+            add_appendix,
             add_note,
             delete_note,
         ])

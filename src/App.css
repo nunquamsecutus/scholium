@@ -582,6 +582,20 @@ body {
   font-style: italic;
 }
 
+.appendix-ref {
+  color: var(--color-primary);
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+  cursor: pointer;
+  margin: 0 2px;
+}
+
+.appendix-ref:hover,
+.appendix-ref:focus-visible {
+  color: var(--color-primary-hover);
+  outline: none;
+}
+
 /* ── Endnotes section (appended at end of chapter) ──── */
 
 .endnotes-rule {

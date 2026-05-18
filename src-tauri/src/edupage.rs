@@ -369,6 +369,54 @@ pub fn add_note(
     Ok((new_file, new_note))
 }
 
+/// Insert a `[^A<appendix_seq>]` cross-reference marker after the Nth
+/// occurrence of `selection` in the body, recorded as an EDIT revision.
+/// Unlike notes, the appendix link points to another chapter and has no
+/// metadata stored in this file's header — the link target is the manifest
+/// entry whose id is `ap-<seq>`.
+pub fn insert_appendix_ref(
+    raw: &str,
+    appendix_seq: u32,
+    selection: &str,
+    occurrence_index: u32,
+) -> Result<String, String> {
+    let (mut header, _) = parse_blocks(raw)?;
+    let now = chrono::Utc::now().to_rfc3339();
+    let content = reconstruct(raw)?;
+    let anchor = format!("[^A{}]", appendix_seq);
+    let (line_idx, new_line) = insert_anchor(&content, selection, occurrence_index, &anchor)?;
+    let line_number = line_idx + 1;
+    let new_sha1 = sha1_hex(&new_line);
+    let file_id = header.id.clone();
+
+    header.revisions.push(RevisionMeta {
+        id: new_sha1.clone(),
+        ctime: now,
+        action_id: uuid::Uuid::new_v4().to_string(),
+        revision_type: RevisionType::Edit,
+        line_start: line_number,
+        line_end: Some(line_number),
+    });
+
+    let header_json = serde_json::to_string_pretty(&header).expect("header serialization");
+    let lines: Vec<&str> = raw.lines().collect();
+    let body_start = lines
+        .iter()
+        .position(|l| parse_delimiter(l).is_some())
+        .ok_or("no delimiter in edupage")?;
+    let existing_body = lines[body_start..].join("\n");
+
+    let mut new_file = header_json;
+    new_file.push('\n');
+    new_file.push_str(&existing_body);
+    new_file.push('\n');
+    new_file.push_str(&delimiter(&file_id, &new_sha1));
+    new_file.push('\n');
+    new_file.push_str(&new_line);
+
+    Ok(new_file)
+}
+
 /// Remove a note: drops the metadata, strips the NOTE block, and appends a
 /// new EDIT revision that removes the `[^*<id>]` anchor from the body.
 pub fn delete_note(raw: &str, note_id: u32) -> Result<String, String> {
@@ -622,6 +670,31 @@ mod tests {
         // body and add its anchor right after.
         assert!(content.contains("[^*1]"));
         assert!(content.contains("[^†2]"));
+    }
+
+    #[test]
+    fn insert_appendix_ref_adds_marker_after_target() {
+        let raw = create("ch-01", "Chapter", None, "See the gravitational collapse here.");
+        let new_raw =
+            insert_appendix_ref(&raw, 1, "gravitational collapse", 1).unwrap();
+        let content = reconstruct(&new_raw).unwrap();
+        assert_eq!(content, "See the gravitational collapse[^A1] here.");
+    }
+
+    #[test]
+    fn insert_appendix_ref_uses_given_sequence_number() {
+        let raw = create("ch-01", "Chapter", None, "See the collapse here.");
+        let new_raw = insert_appendix_ref(&raw, 4, "collapse", 1).unwrap();
+        let content = reconstruct(&new_raw).unwrap();
+        assert!(content.contains("[^A4]"));
+    }
+
+    #[test]
+    fn insert_appendix_ref_does_not_add_note_metadata() {
+        let raw = create("ch-01", "Chapter", None, "See the collapse here.");
+        let new_raw = insert_appendix_ref(&raw, 1, "collapse", 1).unwrap();
+        let page = read(&new_raw).unwrap();
+        assert!(page.notes.is_empty());
     }
 
     #[test]

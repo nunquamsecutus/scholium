@@ -112,6 +112,22 @@ describe("SelectionToolbar", () => {
     expect(range).toBeInstanceOf(Range);
   });
 
+  it("Appendix click fires onAppendix with the phrase and a range", async () => {
+    const onAppendix = vi.fn();
+    const article = mountArticle();
+    const { findByRole } = render(() => (
+      <SelectionToolbar container={() => article} onAppendix={onAppendix} />
+    ));
+    selectInside(article, 0, 11);
+    fireEvent.click(await findByRole("button", { name: "Tell me more" }));
+    fireEvent.click(await findByRole("button", { name: "Appendix" }));
+
+    expect(onAppendix).toHaveBeenCalledTimes(1);
+    const [phrase, range] = onAppendix.mock.calls[0];
+    expect(phrase).toBe("hello world");
+    expect(range).toBeInstanceOf(Range);
+  });
+
   it("Back returns from the expand sub-menu to the primary toolbar", async () => {
     const article = mountArticle();
     const { findByRole, queryByRole } = render(() => <SelectionToolbar container={() => article} />);
