@@ -64,11 +64,62 @@ describe("SelectionToolbar", () => {
     expect(queryByRole("toolbar")).not.toBeInTheDocument();
   });
 
-  it("does not appear for multi-word selections", () => {
+  it("shows Tell me more (not Define) for multi-word selections", async () => {
     const article = mountArticle();
-    const { queryByRole } = render(() => <SelectionToolbar container={() => article} />);
+    const { findByRole, queryByRole } = render(() => <SelectionToolbar container={() => article} />);
     selectInside(article, 0, 11);
-    expect(queryByRole("toolbar")).not.toBeInTheDocument();
+    expect(await findByRole("button", { name: "Tell me more" })).toBeInTheDocument();
+    expect(queryByRole("button", { name: "Define" })).not.toBeInTheDocument();
+  });
+
+  it("Tell me more reveals the Footnote sub-action", async () => {
+    const article = mountArticle();
+    const { findByRole } = render(() => <SelectionToolbar container={() => article} />);
+    selectInside(article, 0, 11);
+    fireEvent.click(await findByRole("button", { name: "Tell me more" }));
+    expect(await findByRole("button", { name: "Footnote" })).toBeInTheDocument();
+  });
+
+  it("Footnote click fires onFootnote with the phrase and a range", async () => {
+    const onFootnote = vi.fn();
+    const article = mountArticle();
+    const { findByRole } = render(() => (
+      <SelectionToolbar container={() => article} onFootnote={onFootnote} />
+    ));
+    selectInside(article, 0, 11);
+    fireEvent.click(await findByRole("button", { name: "Tell me more" }));
+    fireEvent.click(await findByRole("button", { name: "Footnote" }));
+
+    expect(onFootnote).toHaveBeenCalledTimes(1);
+    const [phrase, range] = onFootnote.mock.calls[0];
+    expect(phrase).toBe("hello world");
+    expect(range).toBeInstanceOf(Range);
+  });
+
+  it("Endnote click fires onEndnote with the phrase and a range", async () => {
+    const onEndnote = vi.fn();
+    const article = mountArticle();
+    const { findByRole } = render(() => (
+      <SelectionToolbar container={() => article} onEndnote={onEndnote} />
+    ));
+    selectInside(article, 0, 11);
+    fireEvent.click(await findByRole("button", { name: "Tell me more" }));
+    fireEvent.click(await findByRole("button", { name: "Endnote" }));
+
+    expect(onEndnote).toHaveBeenCalledTimes(1);
+    const [phrase, range] = onEndnote.mock.calls[0];
+    expect(phrase).toBe("hello world");
+    expect(range).toBeInstanceOf(Range);
+  });
+
+  it("Back returns from the expand sub-menu to the primary toolbar", async () => {
+    const article = mountArticle();
+    const { findByRole, queryByRole } = render(() => <SelectionToolbar container={() => article} />);
+    selectInside(article, 0, 11);
+    fireEvent.click(await findByRole("button", { name: "Tell me more" }));
+    fireEvent.click(await findByRole("button", { name: "Back" }));
+    expect(await findByRole("button", { name: "Tell me more" })).toBeInTheDocument();
+    expect(queryByRole("button", { name: "Footnote" })).not.toBeInTheDocument();
   });
 
   it("calls onDefine with the word and a Range when Define is clicked", async () => {

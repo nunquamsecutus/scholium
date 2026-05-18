@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { selectedSingleWord } from "./selection";
+import { selectedSingleWord, selectedPhrase } from "./selection";
 
 function selectRange(text: string, start: number, end: number): Selection {
   document.body.innerHTML = "";
@@ -78,5 +78,36 @@ describe("selectedSingleWord", () => {
     sel.removeAllRanges();
     sel.addRange(range);
     expect(selectedSingleWord(sel)).toBe("bold");
+  });
+});
+
+describe("selectedPhrase", () => {
+  beforeEach(() => {
+    window.getSelection()?.removeAllRanges();
+    document.body.innerHTML = "";
+  });
+
+  it("returns null for a single word", () => {
+    expect(selectedPhrase(selectRange("hello world", 0, 5))).toBeNull();
+  });
+
+  it("returns the trimmed phrase for a multi-word selection", () => {
+    expect(selectedPhrase(selectRange("hello world here", 0, 11))).toBe("hello world");
+  });
+
+  it("returns null for null selection", () => {
+    expect(selectedPhrase(null)).toBeNull();
+  });
+
+  it("returns null for a collapsed selection", () => {
+    expect(selectedPhrase(selectRange("hello", 2, 2))).toBeNull();
+  });
+
+  it("returns null for whitespace-only selection", () => {
+    expect(selectedPhrase(selectRange("hello   world", 5, 8))).toBeNull();
+  });
+
+  it("trims leading and trailing whitespace from the phrase", () => {
+    expect(selectedPhrase(selectRange("  hello world  ", 0, 15))).toBe("hello world");
   });
 });

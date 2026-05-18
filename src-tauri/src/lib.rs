@@ -1,6 +1,7 @@
 mod chapter;
 mod define;
 mod edupage;
+mod expand;
 mod llm;
 mod manifest;
 mod onboarding;
@@ -265,6 +266,112 @@ fn chapter_path_for(
 }
 
 #[tauri::command]
+async fn add_footnote(
+    state: tauri::State<'_, AppState>,
+    chapter_id: String,
+    selection: String,
+    occurrence_index: u32,
+    context: String,
+) -> Result<ChapterContent, String> {
+    if selection.trim().is_empty() {
+        return Err("empty selection".to_string());
+    }
+    if context.trim().is_empty() {
+        return Err("empty context".to_string());
+    }
+
+    let book_path = state
+        .book_path
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("no book is open")?;
+    let book = manifest::load(&book_path)?;
+    let reading_level = book.metadata.reading_level.as_deref().unwrap_or("adult");
+    let topic = Some(book.metadata.topic.as_str()).filter(|s| !s.is_empty());
+
+    let settings = state.settings.lock().unwrap().clone();
+    let messages = expand::build_footnote_messages(&selection, &context, reading_level, topic);
+    let raw = dispatch_llm(&settings, messages).await?;
+    let body = expand::clean_footnote_response(&raw);
+    if body.is_empty() {
+        return Err("model returned an empty footnote".to_string());
+    }
+
+    let chapter_path = chapter_path_for(&state, &chapter_id)?;
+    let raw_file = std::fs::read_to_string(&chapter_path)
+        .map_err(|e| format!("failed to read chapter: {e}"))?;
+    let (new_raw, _) = edupage::add_note(
+        &raw_file,
+        edupage::NoteType::Footnote,
+        &selection,
+        occurrence_index,
+        &body,
+    )?;
+    std::fs::write(&chapter_path, &new_raw)
+        .map_err(|e| format!("failed to write chapter: {e}"))?;
+
+    let page = edupage::read(&new_raw)?;
+    Ok(ChapterContent {
+        content: page.content,
+        notes: page.notes,
+    })
+}
+
+#[tauri::command]
+async fn add_endnote(
+    state: tauri::State<'_, AppState>,
+    chapter_id: String,
+    selection: String,
+    occurrence_index: u32,
+    context: String,
+) -> Result<ChapterContent, String> {
+    if selection.trim().is_empty() {
+        return Err("empty selection".to_string());
+    }
+    if context.trim().is_empty() {
+        return Err("empty context".to_string());
+    }
+
+    let book_path = state
+        .book_path
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("no book is open")?;
+    let book = manifest::load(&book_path)?;
+    let reading_level = book.metadata.reading_level.as_deref().unwrap_or("adult");
+    let topic = Some(book.metadata.topic.as_str()).filter(|s| !s.is_empty());
+
+    let settings = state.settings.lock().unwrap().clone();
+    let messages = expand::build_endnote_messages(&selection, &context, reading_level, topic);
+    let raw = dispatch_llm(&settings, messages).await?;
+    let body = expand::clean_endnote_response(&raw);
+    if body.is_empty() {
+        return Err("model returned an empty endnote".to_string());
+    }
+
+    let chapter_path = chapter_path_for(&state, &chapter_id)?;
+    let raw_file = std::fs::read_to_string(&chapter_path)
+        .map_err(|e| format!("failed to read chapter: {e}"))?;
+    let (new_raw, _) = edupage::add_note(
+        &raw_file,
+        edupage::NoteType::Endnote,
+        &selection,
+        occurrence_index,
+        &body,
+    )?;
+    std::fs::write(&chapter_path, &new_raw)
+        .map_err(|e| format!("failed to write chapter: {e}"))?;
+
+    let page = edupage::read(&new_raw)?;
+    Ok(ChapterContent {
+        content: page.content,
+        notes: page.notes,
+    })
+}
+
+#[tauri::command]
 fn delete_note(
     state: tauri::State<'_, AppState>,
     chapter_id: String,
@@ -457,6 +564,8 @@ pub fn run() {
             generate_chapter,
             read_chapter,
             define_word,
+            add_footnote,
+            add_endnote,
             add_note,
             delete_note,
         ])

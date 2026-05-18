@@ -570,6 +570,171 @@ body {
   background: rgba(79, 110, 247, 0.18);
 }
 
+.note-anchor[data-note-type="footnote"],
+.note-anchor[data-note-type="endnote"] {
+  font-size: 0.75em;
+  color: var(--color-primary);
+  font-weight: 600;
+  padding: 0 2px;
+}
+
+.note-anchor[data-note-type="endnote"] {
+  font-style: italic;
+}
+
+/* ── Endnotes section (appended at end of chapter) ──── */
+
+.endnotes-rule {
+  margin: 32px 0 24px;
+  border: none;
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.endnotes-heading {
+  font-size: 1.1rem !important;
+  font-weight: 700;
+  color: #e2e8f0;
+  margin: 0 0 16px !important;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.endnotes-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.endnote-item {
+  display: flex;
+  gap: 10px;
+  font-size: 0.9rem;
+  line-height: 1.6;
+  color: #cbd5e0;
+}
+
+.endnote-number {
+  flex-shrink: 0;
+  font-weight: 600;
+  color: var(--color-primary);
+  min-width: 24px;
+}
+
+.endnote-body p {
+  margin: 0 0 8px;
+}
+
+.endnote-body p:last-child {
+  margin-bottom: 0;
+}
+
+.reader-back-btn {
+  appearance: none;
+  background: rgba(79, 110, 247, 0.15);
+  border: 1px solid rgba(79, 110, 247, 0.3);
+  color: var(--color-primary);
+  font: inherit;
+  font-size: 0.8rem;
+  padding: 6px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  margin-left: 16px;
+  min-height: 32px;
+}
+
+.reader-back-btn:hover {
+  background: rgba(79, 110, 247, 0.25);
+}
+
+/* ── Footnote bottom sheet ──────────────────────────── */
+
+.footnote-sheet-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  z-index: 200;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  animation: fadeIn 0.15s ease-out;
+}
+
+.footnote-sheet {
+  width: 100%;
+  max-width: 640px;
+  max-height: 60vh;
+  background: #1a202c;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px 12px 0 0;
+  box-shadow: 0 -12px 32px rgba(0, 0, 0, 0.5);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  animation: slideUp 0.2s ease-out;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes slideUp {
+  from { transform: translateY(100%); }
+  to { transform: translateY(0); }
+}
+
+.footnote-sheet-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 24px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  flex-shrink: 0;
+}
+
+.footnote-sheet-title {
+  color: #a0aec0;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 600;
+}
+
+.footnote-sheet-close {
+  appearance: none;
+  background: transparent;
+  border: none;
+  color: #a0aec0;
+  font: inherit;
+  font-size: 1.4rem;
+  line-height: 1;
+  cursor: pointer;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+}
+
+.footnote-sheet-close:hover,
+.footnote-sheet-close:focus-visible {
+  background: rgba(255, 255, 255, 0.08);
+  color: #e2e8f0;
+}
+
+.footnote-sheet-body {
+  color: #cbd5e0;
+  font-size: 0.95rem;
+  line-height: 1.7;
+  padding: 18px 24px 24px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+}
+
 @media (max-width: 980px) {
   .margin-column { display: none; }
 }

@@ -54,10 +54,29 @@ pub struct AssetMeta {
     pub name: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NoteType {
     #[serde(rename = "definition")]
     Definition,
+    #[serde(rename = "footnote")]
+    Footnote,
+    #[serde(rename = "endnote")]
+    Endnote,
+}
+
+/// The marker character that follows `[^` in the source-level anchor for a
+/// note of the given type. Asterisk for definitions, dagger for footnotes,
+/// double-dagger for endnotes.
+pub fn marker_char(note_type: &NoteType) -> char {
+    match note_type {
+        NoteType::Definition => '*',
+        NoteType::Footnote => '†',
+        NoteType::Endnote => '‡',
+    }
+}
+
+fn anchor_text(note_type: &NoteType, id: u32) -> String {
+    format!("[^{}{}]", marker_char(note_type), id)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -226,14 +245,16 @@ pub fn read(raw: &str) -> Result<EduPage, String> {
     Ok(EduPage { content, notes })
 }
 
-/// Insert `[^*<note_id>]` after the `target_n`-th word-bounded occurrence of
-/// `word` in `content`. Returns the 0-indexed line number that changed and
+/// Insert `anchor` after the `target_n`-th word-bounded occurrence of
+/// `query` in `content`. `query` may be a single word or a multi-word phrase
+/// — word-boundary checks apply to the character immediately preceding and
+/// following the match. Returns the 0-indexed line number that changed and
 /// the new line text.
 fn insert_anchor(
     content: &str,
-    word: &str,
+    query: &str,
     target_n: u32,
-    note_id: u32,
+    anchor: &str,
 ) -> Result<(usize, String), String> {
     if target_n == 0 {
         return Err("occurrence index must be 1 or greater".to_string());
@@ -241,9 +262,9 @@ fn insert_anchor(
     let mut count: u32 = 0;
     for (line_idx, line) in content.lines().enumerate() {
         let mut search_start = 0;
-        while let Some(rel_pos) = line[search_start..].find(word) {
+        while let Some(rel_pos) = line[search_start..].find(query) {
             let pos = search_start + rel_pos;
-            let end = pos + word.len();
+            let end = pos + query.len();
 
             let before_is_word = pos > 0
                 && line[..pos]
@@ -261,7 +282,6 @@ fn insert_anchor(
             if !before_is_word && !after_is_word {
                 count += 1;
                 if count == target_n {
-                    let anchor = format!("[^*{}]", note_id);
                     let new_line = format!("{}{}{}", &line[..end], anchor, &line[end..]);
                     return Ok((line_idx, new_line));
                 }
@@ -272,7 +292,7 @@ fn insert_anchor(
     }
     Err(format!(
         "could not find occurrence {} of '{}'",
-        target_n, word
+        target_n, query
     ))
 }
 
@@ -296,9 +316,10 @@ pub fn add_note(
     header.next_note_id = next_id + 1;
     let now = chrono::Utc::now().to_rfc3339();
 
-    // Reconstruct current markdown content so we can locate the word.
+    // Reconstruct current markdown content so we can locate the target.
     let content = reconstruct(raw)?;
-    let (line_idx, new_line) = insert_anchor(&content, word, occurrence_index, next_id)?;
+    let anchor = anchor_text(&note_type, next_id);
+    let (line_idx, new_line) = insert_anchor(&content, word, occurrence_index, &anchor)?;
     let line_number = line_idx + 1; // 1-indexed for RevisionMeta
 
     let new_sha1 = sha1_hex(&new_line);
@@ -358,10 +379,11 @@ pub fn delete_note(raw: &str, note_id: u32) -> Result<String, String> {
         .iter()
         .position(|n| n.id == note_id)
         .ok_or_else(|| format!("note {} not found", note_id))?;
+    let note_type = header.notes[note_idx].note_type.clone();
 
     let now = chrono::Utc::now().to_rfc3339();
     let content = reconstruct(raw)?;
-    let anchor = format!("[^*{}]", note_id);
+    let anchor = anchor_text(&note_type, note_id);
 
     let (line_idx, new_line) = content
         .lines()
@@ -571,6 +593,82 @@ mod tests {
         let raw = delete_note(&raw, 1).unwrap();
         let (_, note) = add_note(&raw, NoteType::Definition, "blackhole", 1, "B").unwrap();
         assert_eq!(note.id, 2, "deleted id 1 should not be reused");
+    }
+
+    #[test]
+    fn add_note_footnote_uses_dagger_marker() {
+        let raw = create("ch-01", "Chapter", None, "The gravitational collapse is fast.");
+        let (new_raw, note) = add_note(
+            &raw,
+            NoteType::Footnote,
+            "gravitational collapse",
+            1,
+            "A few sentences about collapse.",
+        )
+        .unwrap();
+        assert_eq!(note.note_type, NoteType::Footnote);
+        let content = reconstruct(&new_raw).unwrap();
+        assert_eq!(content, "The gravitational collapse[^†1] is fast.");
+    }
+
+    #[test]
+    fn add_note_supports_mixed_types_with_distinct_markers() {
+        let raw = create("ch-01", "Chapter", None, "The blackhole is here.");
+        let (raw, _) = add_note(&raw, NoteType::Definition, "blackhole", 1, "Def body").unwrap();
+        let (raw, _) = add_note(&raw, NoteType::Footnote, "blackhole", 1, "Footnote body").unwrap();
+        let content = reconstruct(&raw).unwrap();
+        // The definition's anchor is part of the word now; the footnote
+        // search must still find "blackhole" at occurrence 1 in the edited
+        // body and add its anchor right after.
+        assert!(content.contains("[^*1]"));
+        assert!(content.contains("[^†2]"));
+    }
+
+    #[test]
+    fn add_note_endnote_uses_double_dagger_marker() {
+        let raw = create("ch-01", "Chapter", None, "The Hawking radiation is subtle.");
+        let (new_raw, note) = add_note(
+            &raw,
+            NoteType::Endnote,
+            "Hawking radiation",
+            1,
+            "An endnote explaining Hawking radiation in some depth.",
+        )
+        .unwrap();
+        assert_eq!(note.note_type, NoteType::Endnote);
+        let content = reconstruct(&new_raw).unwrap();
+        assert_eq!(content, "The Hawking radiation[^‡1] is subtle.");
+    }
+
+    #[test]
+    fn delete_note_removes_endnote_anchor() {
+        let raw = create("ch-01", "Chapter", None, "Note the Hawking radiation here.");
+        let (raw, _) =
+            add_note(&raw, NoteType::Endnote, "Hawking radiation", 1, "Endnote body").unwrap();
+        let raw = delete_note(&raw, 1).unwrap();
+        assert_eq!(
+            reconstruct(&raw).unwrap(),
+            "Note the Hawking radiation here."
+        );
+        assert!(read(&raw).unwrap().notes.is_empty());
+    }
+
+    #[test]
+    fn delete_note_removes_footnote_dagger_anchor() {
+        let raw = create("ch-01", "Chapter", None, "Look at the gravitational collapse here.");
+        let (raw, _) = add_note(
+            &raw,
+            NoteType::Footnote,
+            "gravitational collapse",
+            1,
+            "Footnote body",
+        )
+        .unwrap();
+        let raw = delete_note(&raw, 1).unwrap();
+        let content = reconstruct(&raw).unwrap();
+        assert_eq!(content, "Look at the gravitational collapse here.");
+        let page = read(&raw).unwrap();
+        assert!(page.notes.is_empty());
     }
 
     #[test]

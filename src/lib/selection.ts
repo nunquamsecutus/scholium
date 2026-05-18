@@ -1,6 +1,20 @@
 const WORD_CHAR = /[\p{L}\p{N}'\-]/u;
 
 /**
+ * Returns the trimmed multi-word selection, or null if the selection is
+ * empty, collapsed, or only one word. Used to distinguish single-word
+ * actions (Define) from phrase-level actions (Tell me more).
+ */
+export function selectedPhrase(selection: Selection | null): string | null {
+  if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return null;
+  const trimmed = selection.toString().trim();
+  if (!trimmed) return null;
+  // Must contain internal whitespace to qualify as multi-word.
+  if (!/\s/.test(trimmed)) return null;
+  return trimmed;
+}
+
+/**
  * Returns the single word covered by the current selection, expanding
  * partial selections outward to word boundaries and trimming surrounding
  * whitespace. Returns null when the selection spans multiple words, is

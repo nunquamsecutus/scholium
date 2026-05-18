@@ -33,25 +33,55 @@ interface Props {
   manifest: Manifest;
 }
 
-const NOTE_ICONS: Record<string, string> = {
-  definition: "📖",
-};
-const DEFAULT_NOTE_ICON = "📖";
-
-function iconForNote(type: string | undefined): string {
-  return type && NOTE_ICONS[type] ? NOTE_ICONS[type] : DEFAULT_NOTE_ICON;
+function displayForNote(type: string | undefined, id: string): string {
+  switch (type) {
+    case "definition":
+      return "📖";
+    case "footnote":
+    case "endnote":
+      return id;
+    default:
+      return "📖";
+  }
 }
+
+function labelForNote(note: NoteFromBackend | undefined, id: string): string {
+  if (!note) return `note ${id}`;
+  if (note.type === "footnote") return `Footnote ${id}`;
+  if (note.type === "endnote") return `Endnote ${id}`;
+  return `${note.type} of ${note.word}`;
+}
+
+// `[^*N]` = definition, `[^†N]` = footnote, `[^‡N]` = endnote. Future
+// appendix marker (`A`) will slot in here.
+const ANCHOR_RE = /\[\^([*†‡])(\d+)\]/g;
 
 function renderMarkdown(md: string, notes: NoteFromBackend[]): string {
   const html = DOMPurify.sanitize(marked.parse(md) as string);
   const byId = new Map<number, NoteFromBackend>(notes.map((n) => [n.id, n]));
-  return html.replace(/\[\^\*(\d+)\]/g, (_, id) => {
+  let processed = html.replace(ANCHOR_RE, (_, _marker, id) => {
     const note = byId.get(Number(id));
-    const icon = iconForNote(note?.type);
     const type = note?.type ?? "unknown";
-    const label = note ? `${type} of ${note.word}` : `note ${id}`;
-    return `<sup class="note-anchor" data-note-id="${id}" data-note-type="${type}" aria-label="${label}">${icon}</sup>`;
+    const display = displayForNote(note?.type, id);
+    const label = labelForNote(note, id);
+    return `<sup class="note-anchor" data-note-id="${id}" data-note-type="${type}" aria-label="${label}">${display}</sup>`;
   });
+
+  // Append an "Endnotes" section at the end of the chapter for any endnotes
+  // present. It flows through the same column layout as the main content, so
+  // it lands on whichever page it falls on.
+  const endnotes = notes.filter((n) => n.type === "endnote");
+  if (endnotes.length > 0) {
+    let section = '<hr class="endnotes-rule" /><section class="endnotes" aria-label="Endnotes"><h2 class="endnotes-heading">Endnotes</h2><ol class="endnotes-list">';
+    for (const en of endnotes) {
+      const body = DOMPurify.sanitize(marked.parse(en.body) as string);
+      section += `<li id="endnote-${en.id}" data-endnote-target="${en.id}" class="endnote-item"><span class="endnote-number">${en.id}.</span><div class="endnote-body">${body}</div></li>`;
+    }
+    section += "</ol></section>";
+    processed += section;
+  }
+
+  return processed;
 }
 
 function isWordChar(c: string): boolean {
@@ -112,6 +142,8 @@ export default function BookView(props: Props) {
   const [contentCache, setContentCache] = createSignal<Record<string, string>>({});
   const [chapterNotes, setChapterNotes] = createSignal<Record<string, NoteFromBackend[]>>({});
   const [notePages, setNotePages] = createSignal<Record<number, number>>({});
+  const [activeFootnote, setActiveFootnote] = createSignal<NoteFromBackend | null>(null);
+  const [endnoteReturnPage, setEndnoteReturnPage] = createSignal<number | null>(null);
   const [generating, setGenerating] = createSignal(false);
   const [error, setError] = createSignal("");
   const [articleRef, setArticleRef] = createSignal<HTMLElement>();
@@ -202,9 +234,17 @@ export default function BookView(props: Props) {
     });
   });
 
-  // Keyboard navigation.
+  // Keyboard navigation. Escape closes the footnote sheet; otherwise arrows
+  // turn pages.
   onMount(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (activeFootnote()) {
+        if (e.key === "Escape") {
+          setActiveFootnote(null);
+          e.preventDefault();
+        }
+        return;
+      }
       const ch = selectedChapter();
       if (!ch || ch.status !== "generated") return;
       if (e.target instanceof HTMLElement) {
@@ -223,10 +263,55 @@ export default function BookView(props: Props) {
     onCleanup(() => document.removeEventListener("keydown", onKey));
   });
 
+  function jumpToEndnote(noteId: number) {
+    const article = articleRef();
+    if (!article) return;
+    const el = article.querySelector(
+      `[data-endnote-target="${noteId}"]`,
+    ) as HTMLElement | null;
+    if (!el) return;
+    setEndnoteReturnPage(currentPage());
+    setCurrentPage(pageOfElement(el));
+  }
+
+  function returnFromEndnote() {
+    const back = endnoteReturnPage();
+    if (back !== null) {
+      setCurrentPage(back);
+      setEndnoteReturnPage(null);
+    }
+  }
+
+  // Anchor clicks inside the article: footnotes open the bottom sheet,
+  // endnotes jump to the endnotes section (remembering the return page).
+  // Definitions don't take a click action yet (they live in the margin).
+  createEffect(() => {
+    const article = articleRef();
+    if (!article) return;
+    const onClick = (e: MouseEvent) => {
+      const target = e.target as HTMLElement | null;
+      const anchor = target?.closest(".note-anchor") as HTMLElement | null;
+      if (!anchor) return;
+      const noteId = Number(anchor.dataset.noteId);
+      const noteType = anchor.dataset.noteType;
+      if (noteType === "footnote") {
+        e.preventDefault();
+        const note = currentNotes().find((n) => n.id === noteId);
+        if (note) setActiveFootnote(note);
+      } else if (noteType === "endnote") {
+        e.preventDefault();
+        jumpToEndnote(noteId);
+      }
+    };
+    article.addEventListener("click", onClick);
+    onCleanup(() => article.removeEventListener("click", onClick));
+  });
+
   async function selectChapter(ch: Chapter) {
     setError("");
     setSelectedId(ch.id);
     setCurrentPage(0);
+    setEndnoteReturnPage(null);
 
     if (ch.status === "generated" && !contentCache()[ch.id]) {
       try {
@@ -273,6 +358,60 @@ export default function BookView(props: Props) {
       }));
     } finally {
       setGenerating(false);
+    }
+  }
+
+  async function handleFootnote(phrase: string, range: Range) {
+    const chapterId = selectedId();
+    const article = articleRef();
+    if (!chapterId || !article) return;
+
+    const occurrence = occurrenceIndex(range, article, phrase);
+    if (occurrence < 0) {
+      setError(`Could not locate "${phrase}" in the chapter source.`);
+      return;
+    }
+
+    const context = paragraphContext(range, article);
+
+    try {
+      const result = await invoke<ChapterContent>("add_footnote", {
+        chapterId,
+        selection: phrase,
+        occurrenceIndex: occurrence,
+        context,
+      });
+      setContentCache((c) => ({ ...c, [chapterId]: renderMarkdown(result.content, result.notes) }));
+      setChapterNotes((m) => ({ ...m, [chapterId]: result.notes }));
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function handleEndnote(phrase: string, range: Range) {
+    const chapterId = selectedId();
+    const article = articleRef();
+    if (!chapterId || !article) return;
+
+    const occurrence = occurrenceIndex(range, article, phrase);
+    if (occurrence < 0) {
+      setError(`Could not locate "${phrase}" in the chapter source.`);
+      return;
+    }
+
+    const context = paragraphContext(range, article);
+
+    try {
+      const result = await invoke<ChapterContent>("add_endnote", {
+        chapterId,
+        selection: phrase,
+        occurrenceIndex: occurrence,
+        context,
+      });
+      setContentCache((c) => ({ ...c, [chapterId]: renderMarkdown(result.content, result.notes) }));
+      setChapterNotes((m) => ({ ...m, [chapterId]: result.notes }));
+    } catch (e) {
+      setError(String(e));
     }
   }
 
@@ -418,13 +557,56 @@ export default function BookView(props: Props) {
                   >
                     Next
                   </button>
+                  <Show when={endnoteReturnPage() !== null}>
+                    <button
+                      type="button"
+                      class="reader-back-btn"
+                      onClick={returnFromEndnote}
+                      aria-label={`Back to page ${endnoteReturnPage()! + 1}`}
+                    >
+                      ← Back to page {endnoteReturnPage()! + 1}
+                    </button>
+                  </Show>
                 </nav>
               </div>
             </Show>
           </Match>
         </Switch>
 
-        <SelectionToolbar container={articleRef} onDefine={handleDefine} />
+        <SelectionToolbar
+          container={articleRef}
+          onDefine={handleDefine}
+          onFootnote={handleFootnote}
+          onEndnote={handleEndnote}
+        />
+
+        <Show when={activeFootnote()}>
+          <div
+            class="footnote-sheet-backdrop"
+            onClick={() => setActiveFootnote(null)}
+            role="presentation"
+          >
+            <div
+              class="footnote-sheet"
+              role="dialog"
+              aria-label="Footnote"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div class="footnote-sheet-header">
+                <span class="footnote-sheet-title">Footnote {activeFootnote()!.id}</span>
+                <button
+                  type="button"
+                  class="footnote-sheet-close"
+                  aria-label="Close footnote"
+                  onClick={() => setActiveFootnote(null)}
+                >
+                  ×
+                </button>
+              </div>
+              <div class="footnote-sheet-body">{activeFootnote()!.body}</div>
+            </div>
+          </div>
+        </Show>
       </main>
     </div>
   );
