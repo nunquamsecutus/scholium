@@ -279,9 +279,11 @@ body {
 .book-content {
   flex: 1;
   position: relative;
-  overflow-y: auto;
+  overflow: auto;
   display: flex;
   flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
 }
 
 /* ── Book overview ──────────────────────────────────── */
@@ -386,12 +388,193 @@ body {
   font-style: italic;
 }
 
-/* ── Prose (rendered Markdown) ──────────────────────── */
+/* ── Paginated reader ──────────────────────────────── */
+
+.reader {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  padding: 24px 32px;
+}
+
+.reader-spread {
+  display: flex;
+  gap: 40px;
+  align-items: flex-start;
+}
+
+/* The page wrapper holds padding / background / border. Splitting it from
+ * .chapter-content matters because overflow: hidden clips at the padding
+ * edge — if padding lived on the column box, the overflowing next column
+ * would bleed into the padding zone and be visible. */
+.page-window {
+  width: 600px;
+  height: 640px;
+  padding: 40px 48px;
+  box-sizing: border-box;
+  background: #1f2533;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 6px;
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.45);
+}
 
 .chapter-content {
-  padding: 56px 64px;
-  max-width: 720px;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  padding: 0;
+  max-width: none;
+
+  /* column-width is the "ideal"; the browser will fit one column at the
+   * actual content-area width. JS reads clientWidth at runtime so pagination
+   * stays aligned regardless of the exact pixel value. */
+  column-width: 480px;
+  -webkit-column-width: 480px;
+  column-gap: 0;
+  -webkit-column-gap: 0;
+  column-fill: auto;
+  -webkit-column-fill: auto;
+
+  scroll-behavior: smooth;
 }
+
+.chapter-content::-webkit-scrollbar { display: none; }
+
+.margin-column {
+  width: 240px;
+  min-height: 640px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding-top: 8px;
+}
+
+.margin-item {
+  position: relative;
+  background: rgba(255, 255, 255, 0.03);
+  border-left: 2px solid var(--color-primary);
+  padding: 12px 32px 12px 14px;
+  border-radius: 0 6px 6px 0;
+  font-size: 0.875rem;
+}
+
+.margin-delete {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  color: #718096;
+  font: inherit;
+  font-size: 1.1rem;
+  line-height: 1;
+  border-radius: 4px;
+  cursor: pointer;
+  opacity: 0.5;
+  transition: opacity 0.15s, background 0.15s, color 0.15s;
+}
+
+.margin-item:hover .margin-delete,
+.margin-delete:focus-visible {
+  opacity: 1;
+}
+
+.margin-delete:hover,
+.margin-delete:focus-visible {
+  background: rgba(255, 255, 255, 0.08);
+  color: #e2e8f0;
+}
+
+@media (pointer: coarse) {
+  .margin-delete {
+    width: 32px;
+    height: 32px;
+    opacity: 1;
+  }
+  .margin-item {
+    padding-right: 40px;
+  }
+}
+
+.margin-word {
+  font-weight: 600;
+  color: #f7fafc;
+  margin-bottom: 6px;
+}
+
+.margin-body {
+  color: #cbd5e0;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.margin-loading,
+.margin-empty {
+  color: #718096;
+  font-style: italic;
+}
+
+.reader-controls {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  user-select: none;
+}
+
+.reader-nav-btn {
+  appearance: none;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: #e2e8f0;
+  font: inherit;
+  font-size: 0.875rem;
+  padding: 8px 16px;
+  border-radius: 6px;
+  cursor: pointer;
+  min-height: 36px;
+}
+
+.reader-nav-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.reader-nav-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.page-indicator {
+  color: #a0aec0;
+  font-size: 0.875rem;
+  min-width: 120px;
+  text-align: center;
+}
+
+.note-anchor {
+  font-size: 0.55em;
+  vertical-align: super;
+  margin-left: 1px;
+  padding: 0 1px;
+  border-radius: 3px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.note-anchor:hover {
+  background: rgba(79, 110, 247, 0.18);
+}
+
+@media (max-width: 980px) {
+  .margin-column { display: none; }
+}
+
+/* ── Prose (rendered Markdown) ──────────────────────── */
 
 .prose { color: #e2e8f0; font-size: 1rem; line-height: 1.8; }
 .prose h1 { font-size: 1.9rem; font-weight: 700; color: #f7fafc; margin: 0 0 24px; line-height: 1.2; }
@@ -408,6 +591,45 @@ body {
 .prose blockquote { border-left: 3px solid var(--color-primary); padding-left: 16px; margin: 0 0 16px; color: #a0aec0; font-style: italic; }
 .prose a { color: var(--color-primary); text-decoration: underline; text-underline-offset: 2px; }
 .prose hr { border: none; border-top: 1px solid rgba(255,255,255,0.08); margin: 32px 0; }
+
+/* ── Selection toolbar ──────────────────────────────── */
+
+.selection-toolbar {
+  display: flex;
+  gap: 2px;
+  background: #1a202c;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  padding: 4px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  z-index: 100;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.selection-action {
+  appearance: none;
+  background: transparent;
+  border: none;
+  color: #e2e8f0;
+  font: inherit;
+  font-size: 0.875rem;
+  padding: 6px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  min-height: 32px;
+}
+
+.selection-action:hover { background: rgba(255, 255, 255, 0.08); }
+.selection-action:active { background: rgba(255, 255, 255, 0.16); }
+
+@media (pointer: coarse) {
+  .selection-action {
+    min-height: 44px;
+    padding: 10px 16px;
+    font-size: 1rem;
+  }
+}
 
 /* ── Onboarding shell ───────────────────────────────── */
 

@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
+use std::collections::HashMap;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -11,6 +12,16 @@ pub struct EdupageHeader {
     pub description: Option<String>,
     pub revisions: Vec<RevisionMeta>,
     pub assets: Vec<AssetMeta>,
+    #[serde(default)]
+    pub notes: Vec<NoteMeta>,
+    /// Monotonically increasing id allocator for notes; never decreases, so
+    /// deleted ids are never re-issued.
+    #[serde(default = "default_next_note_id")]
+    pub next_note_id: u32,
+}
+
+fn default_next_note_id() -> u32 {
+    1
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -43,6 +54,39 @@ pub struct AssetMeta {
     pub name: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum NoteType {
+    #[serde(rename = "definition")]
+    Definition,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NoteMeta {
+    pub id: u32,
+    #[serde(rename = "type")]
+    pub note_type: NoteType,
+    pub word: String,
+    pub ctime: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NoteWithBody {
+    pub id: u32,
+    #[serde(rename = "type")]
+    pub note_type: NoteType,
+    pub word: String,
+    pub ctime: String,
+    pub body: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EduPage {
+    pub content: String,
+    pub notes: Vec<NoteWithBody>,
+}
+
 fn sha1_hex(content: &str) -> String {
     let mut h = Sha1::new();
     h.update(content.as_bytes());
@@ -53,12 +97,20 @@ fn delimiter(file_id: &str, sha1: &str) -> String {
     format!("======! {}|{} !======", file_id, sha1)
 }
 
+fn note_delimiter(file_id: &str, note_id: u32) -> String {
+    format!("======! {}|NOTE:{} !======", file_id, note_id)
+}
+
 fn parse_delimiter(line: &str) -> Option<(String, String)> {
     let inner = line.trim().strip_prefix("======!")?.strip_suffix("!======")?;
     let inner = inner.trim();
     inner
         .split_once('|')
         .map(|(a, b)| (a.trim().to_string(), b.trim().to_string()))
+}
+
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '\'' || c == '-'
 }
 
 pub fn create(file_id: &str, title: &str, description: Option<&str>, content: &str) -> String {
@@ -81,19 +133,22 @@ pub fn create(file_id: &str, title: &str, description: Option<&str>, content: &s
             line_end: Some(line_end),
         }],
         assets: vec![],
+        notes: vec![],
+        next_note_id: 1,
     };
 
     let header_json = serde_json::to_string_pretty(&header).expect("edupage header serialization");
     format!("{}\n{}\n{}", header_json, delimiter(file_id, &sha1), content)
 }
 
-pub fn reconstruct(raw: &str) -> Result<String, String> {
+/// Parse the header and all delimited blocks. Block keys are either revision
+/// sha1s or `NOTE:<id>` markers.
+fn parse_blocks(raw: &str) -> Result<(EdupageHeader, HashMap<String, String>), String> {
     let lines: Vec<&str> = raw.lines().collect();
-
     let delimiters: Vec<(usize, String, String)> = lines
         .iter()
         .enumerate()
-        .filter_map(|(i, line)| parse_delimiter(line).map(|(uuid, sha1)| (i, uuid, sha1)))
+        .filter_map(|(i, line)| parse_delimiter(line).map(|(uuid, key)| (i, uuid, key)))
         .collect();
 
     if delimiters.is_empty() {
@@ -104,12 +159,22 @@ pub fn reconstruct(raw: &str) -> Result<String, String> {
     let header: EdupageHeader = serde_json::from_str(&lines[..header_end].join("\n"))
         .map_err(|e| format!("invalid edupage header: {e}"))?;
 
-    let mut blocks: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    for (idx, (line_idx, _, sha1)) in delimiters.iter().enumerate() {
+    let mut blocks: HashMap<String, String> = HashMap::new();
+    for (idx, (line_idx, _, key)) in delimiters.iter().enumerate() {
         let start = line_idx + 1;
-        let end = if idx + 1 < delimiters.len() { delimiters[idx + 1].0 } else { lines.len() };
-        blocks.insert(sha1.clone(), lines[start..end].join("\n"));
+        let end = if idx + 1 < delimiters.len() {
+            delimiters[idx + 1].0
+        } else {
+            lines.len()
+        };
+        blocks.insert(key.clone(), lines[start..end].join("\n"));
     }
+
+    Ok((header, blocks))
+}
+
+pub fn reconstruct(raw: &str) -> Result<String, String> {
+    let (header, blocks) = parse_blocks(raw)?;
 
     let mut doc: Vec<String> = Vec::new();
     for rev in &header.revisions {
@@ -136,11 +201,231 @@ pub fn reconstruct(raw: &str) -> Result<String, String> {
     Ok(doc.join("\n"))
 }
 
+/// Read the full edupage: reconstructed markdown content plus notes with
+/// their bodies, joined by id.
+pub fn read(raw: &str) -> Result<EduPage, String> {
+    let (header, blocks) = parse_blocks(raw)?;
+    let content = reconstruct(raw)?;
+
+    let notes: Vec<NoteWithBody> = header
+        .notes
+        .iter()
+        .map(|meta| {
+            let key = format!("NOTE:{}", meta.id);
+            let body = blocks.get(&key).cloned().unwrap_or_default();
+            NoteWithBody {
+                id: meta.id,
+                note_type: meta.note_type.clone(),
+                word: meta.word.clone(),
+                ctime: meta.ctime.clone(),
+                body,
+            }
+        })
+        .collect();
+
+    Ok(EduPage { content, notes })
+}
+
+/// Insert `[^*<note_id>]` after the `target_n`-th word-bounded occurrence of
+/// `word` in `content`. Returns the 0-indexed line number that changed and
+/// the new line text.
+fn insert_anchor(
+    content: &str,
+    word: &str,
+    target_n: u32,
+    note_id: u32,
+) -> Result<(usize, String), String> {
+    if target_n == 0 {
+        return Err("occurrence index must be 1 or greater".to_string());
+    }
+    let mut count: u32 = 0;
+    for (line_idx, line) in content.lines().enumerate() {
+        let mut search_start = 0;
+        while let Some(rel_pos) = line[search_start..].find(word) {
+            let pos = search_start + rel_pos;
+            let end = pos + word.len();
+
+            let before_is_word = pos > 0
+                && line[..pos]
+                    .chars()
+                    .last()
+                    .map(is_word_char)
+                    .unwrap_or(false);
+            let after_is_word = end < line.len()
+                && line[end..]
+                    .chars()
+                    .next()
+                    .map(is_word_char)
+                    .unwrap_or(false);
+
+            if !before_is_word && !after_is_word {
+                count += 1;
+                if count == target_n {
+                    let anchor = format!("[^*{}]", note_id);
+                    let new_line = format!("{}{}{}", &line[..end], anchor, &line[end..]);
+                    return Ok((line_idx, new_line));
+                }
+            }
+
+            search_start = pos + 1;
+        }
+    }
+    Err(format!(
+        "could not find occurrence {} of '{}'",
+        target_n, word
+    ))
+}
+
+/// Append a note to the edupage: assigns the next id, inserts the
+/// `[^*<id>]` anchor at the requested occurrence as an EDIT revision, and
+/// stores the body content in a new NOTE block.
+pub fn add_note(
+    raw: &str,
+    note_type: NoteType,
+    word: &str,
+    occurrence_index: u32,
+    note_body: &str,
+) -> Result<(String, NoteMeta), String> {
+    let (mut header, _blocks) = parse_blocks(raw)?;
+
+    // Belt and braces: respect both the counter and any existing ids in case
+    // a file was hand-edited or comes from an older format without the counter.
+    let next_id = header
+        .next_note_id
+        .max(header.notes.iter().map(|n| n.id).max().unwrap_or(0) + 1);
+    header.next_note_id = next_id + 1;
+    let now = chrono::Utc::now().to_rfc3339();
+
+    // Reconstruct current markdown content so we can locate the word.
+    let content = reconstruct(raw)?;
+    let (line_idx, new_line) = insert_anchor(&content, word, occurrence_index, next_id)?;
+    let line_number = line_idx + 1; // 1-indexed for RevisionMeta
+
+    let new_sha1 = sha1_hex(&new_line);
+    let file_id = header.id.clone();
+
+    let new_revision = RevisionMeta {
+        id: new_sha1.clone(),
+        ctime: now.clone(),
+        action_id: uuid::Uuid::new_v4().to_string(),
+        revision_type: RevisionType::Edit,
+        line_start: line_number,
+        line_end: Some(line_number),
+    };
+
+    let new_note = NoteMeta {
+        id: next_id,
+        note_type,
+        word: word.to_string(),
+        ctime: now,
+    };
+
+    header.revisions.push(new_revision);
+    header.notes.push(new_note.clone());
+
+    let header_json = serde_json::to_string_pretty(&header).expect("header serialization");
+
+    // Body of the file = everything from the first delimiter onward, untouched.
+    let lines: Vec<&str> = raw.lines().collect();
+    let body_start = lines
+        .iter()
+        .position(|l| parse_delimiter(l).is_some())
+        .ok_or("no delimiter in edupage")?;
+    let existing_body = lines[body_start..].join("\n");
+
+    let mut new_file = header_json;
+    new_file.push('\n');
+    new_file.push_str(&existing_body);
+    new_file.push('\n');
+    new_file.push_str(&delimiter(&file_id, &new_sha1));
+    new_file.push('\n');
+    new_file.push_str(&new_line);
+    new_file.push('\n');
+    new_file.push_str(&note_delimiter(&file_id, next_id));
+    new_file.push('\n');
+    new_file.push_str(note_body);
+
+    Ok((new_file, new_note))
+}
+
+/// Remove a note: drops the metadata, strips the NOTE block, and appends a
+/// new EDIT revision that removes the `[^*<id>]` anchor from the body.
+pub fn delete_note(raw: &str, note_id: u32) -> Result<String, String> {
+    let (mut header, _blocks) = parse_blocks(raw)?;
+
+    let note_idx = header
+        .notes
+        .iter()
+        .position(|n| n.id == note_id)
+        .ok_or_else(|| format!("note {} not found", note_id))?;
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let content = reconstruct(raw)?;
+    let anchor = format!("[^*{}]", note_id);
+
+    let (line_idx, new_line) = content
+        .lines()
+        .enumerate()
+        .find_map(|(i, line)| {
+            if line.contains(&anchor) {
+                Some((i, line.replace(&anchor, "")))
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| format!("anchor for note {} not found in body", note_id))?;
+    let line_number = line_idx + 1;
+
+    let new_sha1 = sha1_hex(&new_line);
+    let file_id = header.id.clone();
+
+    header.revisions.push(RevisionMeta {
+        id: new_sha1.clone(),
+        ctime: now,
+        action_id: uuid::Uuid::new_v4().to_string(),
+        revision_type: RevisionType::Edit,
+        line_start: line_number,
+        line_end: Some(line_number),
+    });
+    header.notes.remove(note_idx);
+
+    let header_json = serde_json::to_string_pretty(&header).expect("header serialization");
+    let deleted_key = format!("NOTE:{}", note_id);
+
+    let lines: Vec<&str> = raw.lines().collect();
+    let delimiters: Vec<(usize, String, String)> = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(i, line)| parse_delimiter(line).map(|(uuid, key)| (i, uuid, key)))
+        .collect();
+
+    let mut new_file = header_json;
+    new_file.push('\n');
+    for (idx, (line_idx, _, key)) in delimiters.iter().enumerate() {
+        if key == &deleted_key {
+            continue;
+        }
+        let start = *line_idx;
+        let end = if idx + 1 < delimiters.len() {
+            delimiters[idx + 1].0
+        } else {
+            lines.len()
+        };
+        new_file.push_str(&lines[start..end].join("\n"));
+        new_file.push('\n');
+    }
+    new_file.push_str(&delimiter(&file_id, &new_sha1));
+    new_file.push('\n');
+    new_file.push_str(&new_line);
+
+    Ok(new_file)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const SAMPLE_MD: &str = "# Chapter One\n\nHello world.\n\nSecond paragraph.";
+    const SAMPLE_MD: &str = "# Chapter One\n\nHello world.\n\nSecond paragraph with blackhole here. Another blackhole follows.";
 
     #[test]
     fn create_produces_parseable_header() {
@@ -167,5 +452,143 @@ mod tests {
     fn sha1_is_stable() {
         assert_eq!(sha1_hex("hello"), sha1_hex("hello"));
         assert_ne!(sha1_hex("hello"), sha1_hex("world"));
+    }
+
+    #[test]
+    fn read_returns_empty_notes_for_fresh_page() {
+        let raw = create("ch-01", "Chapter One", None, SAMPLE_MD);
+        let page = read(&raw).unwrap();
+        assert_eq!(page.content, SAMPLE_MD);
+        assert!(page.notes.is_empty());
+    }
+
+    #[test]
+    fn add_note_assigns_id_1_on_first_note() {
+        let raw = create("ch-01", "Chapter", None, "The blackhole is here.");
+        let (_, note) = add_note(&raw, NoteType::Definition, "blackhole", 1, "A region of spacetime.").unwrap();
+        assert_eq!(note.id, 1);
+        assert_eq!(note.word, "blackhole");
+    }
+
+    #[test]
+    fn add_note_inserts_anchor_after_target_word() {
+        let raw = create("ch-01", "Chapter", None, "The blackhole is here.");
+        let (new_raw, _) =
+            add_note(&raw, NoteType::Definition, "blackhole", 1, "Definition body").unwrap();
+        let content = reconstruct(&new_raw).unwrap();
+        assert_eq!(content, "The blackhole[^*1] is here.");
+    }
+
+    #[test]
+    fn add_note_respects_occurrence_index() {
+        let raw = create("ch-01", "Chapter", None, "First blackhole. Second blackhole here.");
+        let (new_raw, _) =
+            add_note(&raw, NoteType::Definition, "blackhole", 2, "Body").unwrap();
+        let content = reconstruct(&new_raw).unwrap();
+        assert_eq!(content, "First blackhole. Second blackhole[^*1] here.");
+    }
+
+    #[test]
+    fn add_note_increments_ids_across_calls() {
+        let raw = create("ch-01", "Chapter", None, "First blackhole. Second blackhole here.");
+        let (raw, n1) =
+            add_note(&raw, NoteType::Definition, "blackhole", 1, "A").unwrap();
+        let (raw, n2) =
+            add_note(&raw, NoteType::Definition, "blackhole", 2, "B").unwrap();
+        assert_eq!(n1.id, 1);
+        assert_eq!(n2.id, 2);
+        let content = reconstruct(&raw).unwrap();
+        assert_eq!(content, "First blackhole[^*1]. Second blackhole[^*2] here.");
+    }
+
+    #[test]
+    fn add_note_persists_body_in_note_block() {
+        let raw = create("ch-01", "Chapter", None, "The blackhole is here.");
+        let (new_raw, _) =
+            add_note(&raw, NoteType::Definition, "blackhole", 1, "Definition body text").unwrap();
+        assert!(new_raw.contains("======! ch-01|NOTE:1 !======"));
+        assert!(new_raw.contains("Definition body text"));
+    }
+
+    #[test]
+    fn add_note_returns_error_for_missing_word() {
+        let raw = create("ch-01", "Chapter", None, "Just some text.");
+        let result = add_note(&raw, NoteType::Definition, "blackhole", 1, "Body");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn add_note_returns_error_for_out_of_range_occurrence() {
+        let raw = create("ch-01", "Chapter", None, "One blackhole only.");
+        let result = add_note(&raw, NoteType::Definition, "blackhole", 2, "Body");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn add_note_respects_word_boundaries() {
+        // "ole" matches inside "blackhole" but with surrounding word chars — should be skipped.
+        let raw = create("ch-01", "Chapter", None, "The blackhole has ole here.");
+        let (new_raw, _) = add_note(&raw, NoteType::Definition, "ole", 1, "Body").unwrap();
+        let content = reconstruct(&new_raw).unwrap();
+        assert_eq!(content, "The blackhole has ole[^*1] here.");
+    }
+
+    #[test]
+    fn delete_note_removes_anchor_meta_and_block() {
+        let raw = create("ch-01", "Chapter", None, "The blackhole is here.");
+        let (raw, _) =
+            add_note(&raw, NoteType::Definition, "blackhole", 1, "Definition body").unwrap();
+        let raw = delete_note(&raw, 1).unwrap();
+
+        let content = reconstruct(&raw).unwrap();
+        assert_eq!(content, "The blackhole is here.");
+
+        let page = read(&raw).unwrap();
+        assert!(page.notes.is_empty());
+
+        assert!(!raw.contains("======! ch-01|NOTE:1 !======"));
+        assert!(!raw.contains("Definition body"));
+    }
+
+    #[test]
+    fn delete_note_preserves_other_notes() {
+        let raw = create("ch-01", "Chapter", None, "First blackhole. Second blackhole here.");
+        let (raw, _) = add_note(&raw, NoteType::Definition, "blackhole", 1, "First def").unwrap();
+        let (raw, _) = add_note(&raw, NoteType::Definition, "blackhole", 2, "Second def").unwrap();
+        let raw = delete_note(&raw, 1).unwrap();
+
+        let page = read(&raw).unwrap();
+        assert_eq!(page.notes.len(), 1);
+        assert_eq!(page.notes[0].id, 2);
+        assert_eq!(page.notes[0].body, "Second def");
+        assert_eq!(page.content, "First blackhole. Second blackhole[^*2] here.");
+    }
+
+    #[test]
+    fn delete_note_does_not_reuse_id() {
+        let raw = create("ch-01", "Chapter", None, "A blackhole and a blackhole.");
+        let (raw, _) = add_note(&raw, NoteType::Definition, "blackhole", 1, "A").unwrap();
+        let raw = delete_note(&raw, 1).unwrap();
+        let (_, note) = add_note(&raw, NoteType::Definition, "blackhole", 1, "B").unwrap();
+        assert_eq!(note.id, 2, "deleted id 1 should not be reused");
+    }
+
+    #[test]
+    fn delete_note_returns_error_for_unknown_id() {
+        let raw = create("ch-01", "Chapter", None, "Nothing here.");
+        assert!(delete_note(&raw, 99).is_err());
+    }
+
+    #[test]
+    fn read_returns_notes_with_bodies_after_add() {
+        let raw = create("ch-01", "Chapter", None, "The blackhole is here.");
+        let (raw, _) =
+            add_note(&raw, NoteType::Definition, "blackhole", 1, "Definition body").unwrap();
+        let page = read(&raw).unwrap();
+        assert_eq!(page.notes.len(), 1);
+        assert_eq!(page.notes[0].id, 1);
+        assert_eq!(page.notes[0].word, "blackhole");
+        assert_eq!(page.notes[0].body, "Definition body");
+        assert_eq!(page.content, "The blackhole[^*1] is here.");
     }
 }

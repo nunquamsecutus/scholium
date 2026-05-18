@@ -1,4 +1,5 @@
 mod chapter;
+mod define;
 mod edupage;
 mod llm;
 mod manifest;
@@ -165,14 +166,91 @@ async fn generate_chapter(
 fn read_chapter(
     state: tauri::State<'_, AppState>,
     chapter_id: String,
-) -> Result<String, String> {
+) -> Result<ChapterContent, String> {
+    let chapter_path = chapter_path_for(&state, &chapter_id)?;
+    let raw = std::fs::read_to_string(&chapter_path)
+        .map_err(|e| format!("failed to read chapter: {e}"))?;
+    let page = edupage::read(&raw)?;
+    Ok(ChapterContent {
+        content: page.content,
+        notes: page.notes,
+    })
+}
+
+// ── Definition (LLM, context-aware) ──────────────────────────────────────────
+
+#[tauri::command]
+async fn define_word(
+    state: tauri::State<'_, AppState>,
+    chapter_id: String,
+    word: String,
+    occurrence_index: u32,
+    context: String,
+) -> Result<ChapterContent, String> {
+    if word.trim().is_empty() {
+        return Err("empty word".to_string());
+    }
+    if context.trim().is_empty() {
+        return Err("empty context".to_string());
+    }
+
     let book_path = state
         .book_path
         .lock()
         .unwrap()
         .clone()
         .ok_or("no book is open")?;
+    let book = manifest::load(&book_path)?;
+    let reading_level = book.metadata.reading_level.as_deref().unwrap_or("adult");
+    let topic = Some(book.metadata.topic.as_str()).filter(|s| !s.is_empty());
 
+    let settings = state.settings.lock().unwrap().clone();
+    let messages = define::build_messages(&word, &context, reading_level, topic);
+    let raw = dispatch_llm(&settings, messages).await?;
+    let definition = define::clean_response(&word, &raw);
+    if definition.is_empty() {
+        return Err("model returned an empty definition".to_string());
+    }
+
+    let chapter_path = chapter_path_for(&state, &chapter_id)?;
+    let raw_file = std::fs::read_to_string(&chapter_path)
+        .map_err(|e| format!("failed to read chapter: {e}"))?;
+    let (new_raw, _) = edupage::add_note(
+        &raw_file,
+        edupage::NoteType::Definition,
+        &word,
+        occurrence_index,
+        &definition,
+    )?;
+    std::fs::write(&chapter_path, &new_raw)
+        .map_err(|e| format!("failed to write chapter: {e}"))?;
+
+    let page = edupage::read(&new_raw)?;
+    Ok(ChapterContent {
+        content: page.content,
+        notes: page.notes,
+    })
+}
+
+// ── Notes (marginalia / footnotes / endnotes) ─────────────────────────────────
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChapterContent {
+    pub content: String,
+    pub notes: Vec<edupage::NoteWithBody>,
+}
+
+fn chapter_path_for(
+    state: &tauri::State<'_, AppState>,
+    chapter_id: &str,
+) -> Result<std::path::PathBuf, String> {
+    let book_path = state
+        .book_path
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("no book is open")?;
     let book = manifest::load(&book_path)?;
     let chapter = book
         .lesson_plan
@@ -180,15 +258,59 @@ fn read_chapter(
         .iter()
         .find(|ch| ch.id == chapter_id)
         .ok_or_else(|| format!("chapter {chapter_id} not found"))?;
-
-    let chapter_path = book_path
+    Ok(book_path
         .parent()
         .ok_or("invalid book path")?
-        .join(&chapter.file);
+        .join(&chapter.file))
+}
 
+#[tauri::command]
+fn delete_note(
+    state: tauri::State<'_, AppState>,
+    chapter_id: String,
+    note_id: u32,
+) -> Result<ChapterContent, String> {
+    let chapter_path = chapter_path_for(&state, &chapter_id)?;
     let raw = std::fs::read_to_string(&chapter_path)
         .map_err(|e| format!("failed to read chapter: {e}"))?;
-    edupage::reconstruct(&raw)
+    let new_raw = edupage::delete_note(&raw, note_id)?;
+    std::fs::write(&chapter_path, &new_raw)
+        .map_err(|e| format!("failed to write chapter: {e}"))?;
+    let page = edupage::read(&new_raw)?;
+    Ok(ChapterContent {
+        content: page.content,
+        notes: page.notes,
+    })
+}
+
+#[tauri::command]
+fn add_note(
+    state: tauri::State<'_, AppState>,
+    chapter_id: String,
+    note_type: String,
+    word: String,
+    occurrence_index: u32,
+    body: String,
+) -> Result<ChapterContent, String> {
+    let chapter_path = chapter_path_for(&state, &chapter_id)?;
+    let raw = std::fs::read_to_string(&chapter_path)
+        .map_err(|e| format!("failed to read chapter: {e}"))?;
+
+    let nt = match note_type.as_str() {
+        "definition" => edupage::NoteType::Definition,
+        other => return Err(format!("unknown note type: {other}")),
+    };
+
+    let (new_raw, _) = edupage::add_note(&raw, nt, &word, occurrence_index, &body)?;
+
+    std::fs::write(&chapter_path, &new_raw)
+        .map_err(|e| format!("failed to write chapter: {e}"))?;
+
+    let page = edupage::read(&new_raw)?;
+    Ok(ChapterContent {
+        content: page.content,
+        notes: page.notes,
+    })
 }
 
 // ── Book management ───────────────────────────────────────────────────────────
@@ -334,6 +456,9 @@ pub fn run() {
             load_book,
             generate_chapter,
             read_chapter,
+            define_word,
+            add_note,
+            delete_note,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
