@@ -33,6 +33,19 @@ interface AppendixResult extends ChapterContent {
   manifest: Manifest;
 }
 
+interface ChatMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
+interface RewriteDialogState {
+  rewriteId: number;
+  passage: string;
+  context: string;
+  messages: ChatMessage[];
+  sending: boolean;
+}
+
 interface Props {
   manifest: Manifest;
 }
@@ -151,6 +164,8 @@ export default function BookView(props: Props) {
   const [notePages, setNotePages] = createSignal<Record<number, number>>({});
   const [activeFootnote, setActiveFootnote] = createSignal<NoteFromBackend | null>(null);
   const [endnoteReturnPage, setEndnoteReturnPage] = createSignal<number | null>(null);
+  const [rewriteDialog, setRewriteDialog] = createSignal<RewriteDialogState | null>(null);
+  const [dialogInput, setDialogInput] = createSignal("");
   const [generating, setGenerating] = createSignal(false);
   const [error, setError] = createSignal("");
   const [articleRef, setArticleRef] = createSignal<HTMLElement>();
@@ -245,6 +260,13 @@ export default function BookView(props: Props) {
   // turn pages.
   onMount(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (rewriteDialog()) {
+        if (e.key === "Escape" && !rewriteDialog()!.sending) {
+          setRewriteDialog(null);
+          e.preventDefault();
+        }
+        return;
+      }
       if (activeFootnote()) {
         if (e.key === "Escape") {
           setActiveFootnote(null);
@@ -431,6 +453,79 @@ export default function BookView(props: Props) {
       setChapterNotes((m) => ({ ...m, [chapterId]: result.notes }));
     } catch (e) {
       setError(String(e));
+    }
+  }
+
+  function handleRewriteConversation(rewriteId: number, range: Range) {
+    const article = articleRef();
+    if (!article) return;
+    const span = article.querySelector(
+      `[data-rewrite-id="${rewriteId}"]`,
+    ) as HTMLElement | null;
+    if (!span) return;
+    const passage = span.textContent ?? "";
+    const context = paragraphContext(range, article);
+    setRewriteDialog({
+      rewriteId,
+      passage,
+      context,
+      messages: [],
+      sending: false,
+    });
+    setDialogInput("");
+  }
+
+  async function sendDialogMessage() {
+    const dialog = rewriteDialog();
+    const text = dialogInput().trim();
+    if (!dialog || !text || dialog.sending) return;
+
+    const userMsg: ChatMessage = { role: "user", content: text };
+    const nextMessages = [...dialog.messages, userMsg];
+    setRewriteDialog({ ...dialog, messages: nextMessages, sending: true });
+    setDialogInput("");
+
+    try {
+      const reply = await invoke<string>("converse_about_rewrite", {
+        passage: dialog.passage,
+        context: dialog.context,
+        history: nextMessages,
+      });
+      setRewriteDialog((d) =>
+        d
+          ? {
+              ...d,
+              messages: [...d.messages, { role: "assistant", content: reply }],
+              sending: false,
+            }
+          : null,
+      );
+    } catch (e) {
+      setError(String(e));
+      setRewriteDialog((d) => (d ? { ...d, sending: false } : null));
+    }
+  }
+
+  async function applyUnderstandingRewrite() {
+    const dialog = rewriteDialog();
+    const chapterId = selectedId();
+    if (!dialog || !chapterId || dialog.sending) return;
+    setRewriteDialog({ ...dialog, sending: true });
+
+    try {
+      const result = await invoke<ChapterContent>("rewrite_with_conversation", {
+        chapterId,
+        rewriteId: dialog.rewriteId,
+        passage: dialog.passage,
+        context: dialog.context,
+        history: dialog.messages,
+      });
+      setContentCache((c) => ({ ...c, [chapterId]: renderMarkdown(result.content, result.notes) }));
+      setChapterNotes((m) => ({ ...m, [chapterId]: result.notes }));
+      setRewriteDialog(null);
+    } catch (e) {
+      setError(String(e));
+      setRewriteDialog((d) => (d ? { ...d, sending: false } : null));
     }
   }
 
@@ -654,7 +749,88 @@ export default function BookView(props: Props) {
           onEndnote={handleEndnote}
           onAppendix={handleAppendix}
           onRewrite={handleRewrite}
+          onRewriteConversation={handleRewriteConversation}
         />
+
+        <Show when={rewriteDialog()}>
+          <div
+            class="rewrite-dialog-backdrop"
+            role="presentation"
+            onClick={() => {
+              if (!rewriteDialog()!.sending) setRewriteDialog(null);
+            }}
+          >
+            <div
+              class="rewrite-dialog"
+              role="dialog"
+              aria-label="I still don't understand"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div class="rewrite-dialog-header">
+                <span class="rewrite-dialog-title">I still don't understand</span>
+                <button
+                  type="button"
+                  class="rewrite-dialog-close"
+                  aria-label="Close"
+                  disabled={rewriteDialog()!.sending}
+                  onClick={() => setRewriteDialog(null)}
+                >
+                  ×
+                </button>
+              </div>
+              <div class="rewrite-dialog-passage">
+                <div class="rewrite-dialog-passage-label">The passage</div>
+                <div class="rewrite-dialog-passage-text">{rewriteDialog()!.passage}</div>
+              </div>
+              <div class="rewrite-dialog-conversation">
+                <For each={rewriteDialog()!.messages}>
+                  {(m) => (
+                    <div class={`rewrite-dialog-message rewrite-dialog-message--${m.role}`}>
+                      {m.content}
+                    </div>
+                  )}
+                </For>
+                <Show when={rewriteDialog()!.sending}>
+                  <div class="rewrite-dialog-message rewrite-dialog-message--assistant rewrite-dialog-loading">
+                    …
+                  </div>
+                </Show>
+              </div>
+              <form
+                class="rewrite-dialog-input"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  sendDialogMessage();
+                }}
+              >
+                <textarea
+                  value={dialogInput()}
+                  onInput={(e) => setDialogInput(e.currentTarget.value)}
+                  placeholder="What's confusing about this?"
+                  rows={2}
+                  disabled={rewriteDialog()!.sending}
+                />
+                <button
+                  type="submit"
+                  class="btn-primary"
+                  disabled={!dialogInput().trim() || rewriteDialog()!.sending}
+                >
+                  Send
+                </button>
+              </form>
+              <div class="rewrite-dialog-footer">
+                <button
+                  type="button"
+                  class="rewrite-dialog-understand"
+                  disabled={rewriteDialog()!.sending || rewriteDialog()!.messages.length === 0}
+                  onClick={applyUnderstandingRewrite}
+                >
+                  I understand now
+                </button>
+              </div>
+            </div>
+          </div>
+        </Show>
 
         <Show when={activeFootnote()}>
           <div

@@ -79,6 +79,49 @@ describe("SelectionToolbar", () => {
     expect(await findByRole("button", { name: "I don't understand" })).toBeInTheDocument();
   });
 
+  it("swaps to 'I still don't understand' when selection touches a rewrite span", async () => {
+    const article = document.createElement("article");
+    article.innerHTML = `<p>before <span data-rewrite-id="3">rewritten content</span> after</p>`;
+    document.body.appendChild(article);
+    const { findByRole, queryByRole } = render(() => (
+      <SelectionToolbar container={() => article} />
+    ));
+    const innerText = article.querySelector("span")!.firstChild as Text;
+    const range = document.createRange();
+    range.setStart(innerText, 0);
+    range.setEnd(innerText, "rewritten content".length);
+    const sel = window.getSelection()!;
+    sel.removeAllRanges();
+    sel.addRange(range);
+    document.dispatchEvent(new Event("selectionchange"));
+    expect(await findByRole("button", { name: "I still don't understand" })).toBeInTheDocument();
+    expect(queryByRole("button", { name: "I don't understand" })).not.toBeInTheDocument();
+  });
+
+  it("'I still don't understand' fires onRewriteConversation with the rewrite id", async () => {
+    const onRewriteConversation = vi.fn();
+    const article = document.createElement("article");
+    article.innerHTML = `<p>before <span data-rewrite-id="7">rewritten content</span> after</p>`;
+    document.body.appendChild(article);
+    const { findByRole } = render(() => (
+      <SelectionToolbar container={() => article} onRewriteConversation={onRewriteConversation} />
+    ));
+    const innerText = article.querySelector("span")!.firstChild as Text;
+    const range = document.createRange();
+    range.setStart(innerText, 0);
+    range.setEnd(innerText, "rewritten content".length);
+    const sel = window.getSelection()!;
+    sel.removeAllRanges();
+    sel.addRange(range);
+    document.dispatchEvent(new Event("selectionchange"));
+    fireEvent.click(await findByRole("button", { name: "I still don't understand" }));
+
+    expect(onRewriteConversation).toHaveBeenCalledTimes(1);
+    const [rewriteId, r] = onRewriteConversation.mock.calls[0];
+    expect(rewriteId).toBe(7);
+    expect(r).toBeInstanceOf(Range);
+  });
+
   it("I don't understand fires onRewrite with the phrase and range", async () => {
     const onRewrite = vi.fn();
     const article = mountArticle();

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { selectedSingleWord, selectedPhrase } from "./selection";
+import { selectedSingleWord, selectedPhrase, selectionTouchesRewrite } from "./selection";
 
 function selectRange(text: string, start: number, end: number): Selection {
   document.body.innerHTML = "";
@@ -109,5 +109,56 @@ describe("selectedPhrase", () => {
 
   it("trims leading and trailing whitespace from the phrase", () => {
     expect(selectedPhrase(selectRange("  hello world  ", 0, 15))).toBe("hello world");
+  });
+});
+
+describe("selectionTouchesRewrite", () => {
+  beforeEach(() => {
+    window.getSelection()?.removeAllRanges();
+    document.body.innerHTML = "";
+  });
+
+  function rangeInside(node: Node, start: number, end: number): Range {
+    const range = document.createRange();
+    range.setStart(node, start);
+    range.setEnd(node, end);
+    return range;
+  }
+
+  it("returns false when no rewrite spans exist", () => {
+    const article = document.createElement("article");
+    article.textContent = "hello world";
+    document.body.appendChild(article);
+    const range = rangeInside(article.firstChild!, 0, 11);
+    expect(selectionTouchesRewrite(range, article)).toBe(false);
+  });
+
+  it("returns true when selection is entirely inside a rewrite span", () => {
+    const article = document.createElement("article");
+    article.innerHTML = `<p>before <span data-rewrite-id="1">rewritten content</span> after</p>`;
+    document.body.appendChild(article);
+    const innerText = article.querySelector("span")!.firstChild!;
+    const range = rangeInside(innerText, 0, "rewritten content".length);
+    expect(selectionTouchesRewrite(range, article)).toBe(true);
+  });
+
+  it("returns true when selection crosses a rewrite span boundary", () => {
+    const article = document.createElement("article");
+    article.innerHTML = `<p>before <span data-rewrite-id="1">rewritten</span> after</p>`;
+    document.body.appendChild(article);
+    const p = article.querySelector("p")!;
+    const range = document.createRange();
+    range.setStart(p.firstChild!, 2);
+    range.setEnd(p.lastChild!, 3);
+    expect(selectionTouchesRewrite(range, article)).toBe(true);
+  });
+
+  it("returns false when selection is fully outside any rewrite span", () => {
+    const article = document.createElement("article");
+    article.innerHTML = `<p>before <span data-rewrite-id="1">rewritten</span> after</p>`;
+    document.body.appendChild(article);
+    const lastText = article.querySelector("p")!.lastChild!;
+    const range = rangeInside(lastText, 1, 4);
+    expect(selectionTouchesRewrite(range, article)).toBe(false);
   });
 });

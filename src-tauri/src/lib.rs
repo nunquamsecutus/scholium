@@ -420,6 +420,84 @@ async fn rewrite_passage(
     })
 }
 
+#[tauri::command]
+async fn converse_about_rewrite(
+    state: tauri::State<'_, AppState>,
+    passage: String,
+    context: String,
+    history: Vec<llm::LlmMessage>,
+) -> Result<String, String> {
+    if passage.trim().is_empty() {
+        return Err("empty passage".to_string());
+    }
+
+    let book_path = state
+        .book_path
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("no book is open")?;
+    let book = manifest::load(&book_path)?;
+    let reading_level = book.metadata.reading_level.as_deref().unwrap_or("adult");
+    let topic = Some(book.metadata.topic.as_str()).filter(|s| !s.is_empty());
+
+    let settings = state.settings.lock().unwrap().clone();
+    let messages =
+        rewrite::build_conversation_messages(&passage, &context, reading_level, topic, history);
+    dispatch_llm(&settings, messages).await
+}
+
+#[tauri::command]
+async fn rewrite_with_conversation(
+    state: tauri::State<'_, AppState>,
+    chapter_id: String,
+    rewrite_id: u32,
+    passage: String,
+    context: String,
+    history: Vec<llm::LlmMessage>,
+) -> Result<ChapterContent, String> {
+    if passage.trim().is_empty() {
+        return Err("empty passage".to_string());
+    }
+
+    let book_path = state
+        .book_path
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("no book is open")?;
+    let book = manifest::load(&book_path)?;
+    let reading_level = book.metadata.reading_level.as_deref().unwrap_or("adult");
+    let topic = Some(book.metadata.topic.as_str()).filter(|s| !s.is_empty());
+
+    let settings = state.settings.lock().unwrap().clone();
+    let messages = rewrite::build_conversation_rewrite_messages(
+        &passage,
+        &context,
+        reading_level,
+        topic,
+        history,
+    );
+    let raw_llm = dispatch_llm(&settings, messages).await?;
+    let replacement = rewrite::clean_rewrite_response(&raw_llm);
+    if replacement.is_empty() {
+        return Err("model returned an empty rewrite".to_string());
+    }
+
+    let chapter_path = chapter_path_for(&state, &chapter_id)?;
+    let raw_file = std::fs::read_to_string(&chapter_path)
+        .map_err(|e| format!("failed to read chapter: {e}"))?;
+    let (new_raw, _) = edupage::rewrite_existing_span(&raw_file, rewrite_id, &replacement)?;
+    std::fs::write(&chapter_path, &new_raw)
+        .map_err(|e| format!("failed to write chapter: {e}"))?;
+
+    let page = edupage::read(&new_raw)?;
+    Ok(ChapterContent {
+        content: page.content,
+        notes: page.notes,
+    })
+}
+
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppendixResult {
@@ -737,6 +815,8 @@ pub fn run() {
             add_note,
             delete_note,
             rewrite_passage,
+            converse_about_rewrite,
+            rewrite_with_conversation,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

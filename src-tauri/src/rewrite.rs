@@ -49,6 +49,100 @@ pub fn build_rewrite_messages(
     ]
 }
 
+/// Build messages for the back-and-forth conversation that opens when the
+/// learner clicks "I still don't understand" on an already-rewritten passage.
+/// The system prompt scopes the model to a tutoring role and forbids
+/// proposing edits (the rewrite happens separately when the learner is
+/// ready). `history` is the full prior conversation including the latest
+/// user message — the LLM returns just the next assistant turn.
+pub fn build_conversation_messages(
+    passage: &str,
+    context: &str,
+    reading_level: &str,
+    book_topic: Option<&str>,
+    history: Vec<LlmMessage>,
+) -> Vec<LlmMessage> {
+    let topic_clause = match book_topic {
+        Some(t) if !t.is_empty() => format!("\nThe book's subject is: {t}.\n"),
+        _ => String::new(),
+    };
+
+    let system = format!(
+        "You're a patient tutor for a learner reading at {} reading level.{}\n\n\
+         The learner is reading the passage below and has already asked for a \
+         simpler version, but they still don't understand. Help them by \
+         answering their questions and clarifying concepts. Use language and \
+         examples pitched at their reading level.\n\n\
+         Passage they're struggling with:\n{}\n\n\
+         Surrounding paragraph: {}\n\n\
+         Rules:\n\
+         - Be concise and focused. 1 to 3 sentences per turn is usually right.\n\
+         - Don't suggest rewrites or modifications — the learner will request \
+           a rewrite separately when they're ready.\n\
+         - If they ask multiple questions in one turn, address each briefly.",
+        reading_level_description(reading_level),
+        topic_clause,
+        passage,
+        context,
+    );
+
+    let mut messages = vec![LlmMessage { role: "system".to_string(), content: system }];
+    messages.extend(history);
+    messages
+}
+
+/// Build messages for the post-conversation rewrite: produce a clearer
+/// version of the passage that incorporates the concepts and explanations
+/// from the tutoring conversation.
+pub fn build_conversation_rewrite_messages(
+    passage: &str,
+    context: &str,
+    reading_level: &str,
+    book_topic: Option<&str>,
+    history: Vec<LlmMessage>,
+) -> Vec<LlmMessage> {
+    let topic_clause = match book_topic {
+        Some(t) if !t.is_empty() => format!("\nThe book's subject is: {t}.\n"),
+        _ => String::new(),
+    };
+
+    let transcript: String = history
+        .iter()
+        .filter(|m| m.role != "system")
+        .map(|m| format!("{}: {}", m.role, m.content))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let system = format!(
+        "You rewrite passages from educational content for a learner reading at \
+         {} reading level.{}\n\n\
+         The learner has been struggling with the passage below. A tutor \
+         conversation about what was confusing is included — write a clearer \
+         version of the passage that incorporates the concepts and \
+         explanations that helped them in the conversation.\n\n\
+         Passage to rewrite:\n{}\n\n\
+         Surrounding paragraph: {}\n\n\
+         Tutor conversation:\n{}\n\n\
+         Rules:\n\
+         - Return ONLY the rewritten passage as plain prose.\n\
+         - No \"Here is...\" prefix. No quotes. No markdown.\n\
+         - Reads as a drop-in replacement in the surrounding paragraph.\n\
+         - Pitch language to the reader's level.",
+        reading_level_description(reading_level),
+        topic_clause,
+        passage,
+        context,
+        transcript,
+    );
+
+    let user = "Write the improved version of the passage.".to_string();
+
+    vec![
+        LlmMessage { role: "system".to_string(), content: system },
+        LlmMessage { role: "user".to_string(), content: user },
+    ]
+}
+
 /// Strip common "Here is..." / "Rewrite:" prefixes and wrapping quotes the
 /// model may add despite instructions.
 pub fn clean_rewrite_response(raw: &str) -> String {
@@ -145,5 +239,58 @@ mod tests {
             clean_rewrite_response("A region of spacetime."),
             "A region of spacetime."
         );
+    }
+
+    #[test]
+    fn conversation_prompt_pins_tutor_role_and_passage() {
+        let history = vec![LlmMessage {
+            role: "user".to_string(),
+            content: "What does 'collapse' mean here?".to_string(),
+        }];
+        let msgs = build_conversation_messages(
+            "gravitational collapse",
+            "When a massive star runs out of fuel, gravitational collapse begins.",
+            "adult",
+            None,
+            history,
+        );
+        let system = msgs.iter().find(|m| m.role == "system").unwrap();
+        assert!(system.content.contains("tutor"));
+        assert!(system.content.contains("gravitational collapse"));
+        assert!(system.content.contains("Don't suggest rewrites"));
+        // History is preserved after the system message.
+        assert_eq!(msgs[1].role, "user");
+        assert!(msgs[1].content.contains("collapse"));
+    }
+
+    #[test]
+    fn conversation_rewrite_prompt_includes_transcript() {
+        let history = vec![
+            LlmMessage { role: "user".to_string(), content: "What is collapse?".to_string() },
+            LlmMessage { role: "assistant".to_string(), content: "It's when matter falls inward.".to_string() },
+        ];
+        let msgs = build_conversation_rewrite_messages(
+            "gravitational collapse",
+            "When a massive star runs out of fuel, gravitational collapse begins.",
+            "adult",
+            None,
+            history,
+        );
+        let system = msgs.iter().find(|m| m.role == "system").unwrap();
+        assert!(system.content.contains("matter falls inward"));
+        assert!(system.content.contains("gravitational collapse"));
+        assert!(system.content.contains("plain prose"));
+    }
+
+    #[test]
+    fn conversation_rewrite_prompt_drops_system_messages_from_transcript() {
+        let history = vec![
+            LlmMessage { role: "system".to_string(), content: "internal".to_string() },
+            LlmMessage { role: "user".to_string(), content: "Q?".to_string() },
+        ];
+        let msgs = build_conversation_rewrite_messages("p", "c", "adult", None, history);
+        let system = msgs.iter().find(|m| m.role == "system").unwrap();
+        assert!(!system.content.contains("internal"));
+        assert!(system.content.contains("Q?"));
     }
 }

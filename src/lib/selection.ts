@@ -1,6 +1,20 @@
 const WORD_CHAR = /[\p{L}\p{N}'\-]/u;
 
 /**
+ * Returns true if the given Range intersects any element marked with
+ * `[data-rewrite-id]` inside the container. Used to switch the toolbar from
+ * "I don't understand" (first rewrite) to "I still don't understand" (open
+ * the conversation dialog about an existing rewrite).
+ */
+export function selectionTouchesRewrite(range: Range, container: HTMLElement): boolean {
+  const rewrites = container.querySelectorAll("[data-rewrite-id]");
+  for (const r of Array.from(rewrites)) {
+    if (range.intersectsNode(r)) return true;
+  }
+  return false;
+}
+
+/**
  * Returns the trimmed multi-word selection, or null if the selection is
  * empty, collapsed, or only one word. Used to distinguish single-word
  * actions (Define) from phrase-level actions (Tell me more).

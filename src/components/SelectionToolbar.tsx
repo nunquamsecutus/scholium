@@ -1,5 +1,5 @@
 import { createSignal, onCleanup, onMount, Show } from "solid-js";
-import { selectedSingleWord, selectedPhrase } from "../lib/selection";
+import { selectedSingleWord, selectedPhrase, selectionTouchesRewrite } from "../lib/selection";
 
 interface Props {
   container: () => HTMLElement | undefined;
@@ -8,6 +8,7 @@ interface Props {
   onEndnote?: (phrase: string, range: Range) => void;
   onAppendix?: (phrase: string, range: Range) => void;
   onRewrite?: (phrase: string, range: Range) => void;
+  onRewriteConversation?: (rewriteId: number, range: Range) => void;
 }
 
 type Mode = "primary" | "expand";
@@ -18,12 +19,26 @@ export default function SelectionToolbar(props: Props) {
   const [range, setRange] = createSignal<Range | null>(null);
   const [pos, setPos] = createSignal({ top: 0, left: 0 });
   const [mode, setMode] = createSignal<Mode>("primary");
+  const [touchedRewriteId, setTouchedRewriteId] = createSignal<number | null>(null);
 
   function clear() {
     setWord(null);
     setPhrase(null);
     setRange(null);
     setMode("primary");
+    setTouchedRewriteId(null);
+  }
+
+  // Find the first rewrite span the range intersects, returning its id.
+  function findTouchedRewriteId(r: Range, container: HTMLElement): number | null {
+    const spans = container.querySelectorAll("[data-rewrite-id]");
+    for (const span of Array.from(spans)) {
+      if (r.intersectsNode(span)) {
+        const id = Number((span as HTMLElement).dataset.rewriteId);
+        return Number.isFinite(id) ? id : null;
+      }
+    }
+    return null;
   }
 
   function update() {
@@ -52,6 +67,9 @@ export default function SelectionToolbar(props: Props) {
     setWord(w);
     setPhrase(p);
     setMode("primary");
+    setTouchedRewriteId(
+      p && selectionTouchesRewrite(r, containerEl) ? findTouchedRewriteId(r, containerEl) : null,
+    );
   }
 
   function define() {
@@ -86,7 +104,12 @@ export default function SelectionToolbar(props: Props) {
     const p = phrase();
     const r = range();
     if (!p || !r) return;
-    props.onRewrite?.(p, r);
+    const id = touchedRewriteId();
+    if (id !== null) {
+      props.onRewriteConversation?.(id, r);
+    } else {
+      props.onRewrite?.(p, r);
+    }
   }
 
   onMount(() => {
@@ -123,7 +146,7 @@ export default function SelectionToolbar(props: Props) {
               Tell me more
             </button>
             <button type="button" class="selection-action" onClick={rewrite}>
-              I don't understand
+              {touchedRewriteId() !== null ? "I still don't understand" : "I don't understand"}
             </button>
           </Show>
         </Show>

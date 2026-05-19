@@ -497,6 +497,78 @@ pub fn rewrite_passage(
     Ok((new_file, rewrite_id))
 }
 
+/// Replace the entire `<span data-rewrite-id="<rewrite_id>">…</span>` with a
+/// new span carrying the next monotonic id and `new_replacement` as its
+/// content. Recorded as a single-line EDIT revision. Assumes the rewrite
+/// span sits on a single line (true for content produced by
+/// `rewrite_passage`).
+pub fn rewrite_existing_span(
+    raw: &str,
+    rewrite_id: u32,
+    new_replacement: &str,
+) -> Result<(String, u32), String> {
+    let (mut header, _) = parse_blocks(raw)?;
+    let new_id = header.next_rewrite_id;
+    header.next_rewrite_id = new_id + 1;
+    let now = chrono::Utc::now().to_rfc3339();
+
+    let content = reconstruct(raw)?;
+    let open_marker = format!(r#"<span data-rewrite-id="{}">"#, rewrite_id);
+    let close_marker = "</span>";
+
+    let mut found: Option<(usize, String)> = None;
+    for (idx, line) in content.lines().enumerate() {
+        if let Some(open_pos) = line.find(&open_marker) {
+            let inner_start = open_pos + open_marker.len();
+            if let Some(close_rel) = line[inner_start..].find(close_marker) {
+                let span_end = inner_start + close_rel + close_marker.len();
+                let new_span = format!(
+                    r#"<span data-rewrite-id="{}">{}</span>"#,
+                    new_id,
+                    html_escape(new_replacement),
+                );
+                let new_line =
+                    format!("{}{}{}", &line[..open_pos], new_span, &line[span_end..]);
+                found = Some((idx, new_line));
+                break;
+            }
+        }
+    }
+    let (line_idx, new_line) =
+        found.ok_or_else(|| format!("rewrite span {} not found", rewrite_id))?;
+
+    let line_number = line_idx + 1;
+    let new_sha1 = sha1_hex(&new_line);
+    let file_id = header.id.clone();
+
+    header.revisions.push(RevisionMeta {
+        id: new_sha1.clone(),
+        ctime: now,
+        action_id: uuid::Uuid::new_v4().to_string(),
+        revision_type: RevisionType::Edit,
+        line_start: line_number,
+        line_end: Some(line_number),
+    });
+
+    let header_json = serde_json::to_string_pretty(&header).expect("header serialization");
+    let lines: Vec<&str> = raw.lines().collect();
+    let body_start = lines
+        .iter()
+        .position(|l| parse_delimiter(l).is_some())
+        .ok_or("no delimiter in edupage")?;
+    let existing_body = lines[body_start..].join("\n");
+
+    let mut new_file = header_json;
+    new_file.push('\n');
+    new_file.push_str(&existing_body);
+    new_file.push('\n');
+    new_file.push_str(&delimiter(&file_id, &new_sha1));
+    new_file.push('\n');
+    new_file.push_str(&new_line);
+
+    Ok((new_file, new_id))
+}
+
 /// Insert a `[^A<appendix_seq>]` cross-reference marker after the Nth
 /// occurrence of `selection` in the body, recorded as an EDIT revision.
 /// Unlike notes, the appendix link points to another chapter and has no
@@ -843,6 +915,33 @@ mod tests {
     fn rewrite_passage_errors_when_selection_not_found() {
         let raw = create("ch-01", "Chapter", None, "Just some text.");
         assert!(rewrite_passage(&raw, "missing phrase", 1, "X").is_err());
+    }
+
+    #[test]
+    fn rewrite_existing_span_replaces_with_new_id() {
+        let raw = create("ch-01", "Chapter", None, "The collapse is dramatic.");
+        let (raw, old_id) =
+            rewrite_passage(&raw, "collapse is dramatic", 1, "fall is sudden").unwrap();
+        let (new_raw, new_id) =
+            rewrite_existing_span(&raw, old_id, "drop is rapid").unwrap();
+        assert!(new_id > old_id);
+        let content = reconstruct(&new_raw).unwrap();
+        assert!(content.contains(&format!(r#"<span data-rewrite-id="{}">drop is rapid</span>"#, new_id)));
+        assert!(!content.contains(&format!(r#"data-rewrite-id="{}""#, old_id)));
+    }
+
+    #[test]
+    fn rewrite_existing_span_html_escapes_content() {
+        let raw = create("ch-01", "Chapter", None, "The collapse here.");
+        let (raw, old_id) = rewrite_passage(&raw, "collapse", 1, "first").unwrap();
+        let (new_raw, _) = rewrite_existing_span(&raw, old_id, "A < B").unwrap();
+        assert!(reconstruct(&new_raw).unwrap().contains("A &lt; B"));
+    }
+
+    #[test]
+    fn rewrite_existing_span_errors_for_unknown_id() {
+        let raw = create("ch-01", "Chapter", None, "Just plain text.");
+        assert!(rewrite_existing_span(&raw, 99, "X").is_err());
     }
 
     #[test]
