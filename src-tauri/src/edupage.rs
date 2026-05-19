@@ -18,9 +18,17 @@ pub struct EdupageHeader {
     /// deleted ids are never re-issued.
     #[serde(default = "default_next_note_id")]
     pub next_note_id: u32,
+    /// Monotonically increasing id allocator for rewrite spans. Same rule
+    /// as next_note_id — ids are never reused.
+    #[serde(default = "default_next_rewrite_id")]
+    pub next_rewrite_id: u32,
 }
 
 fn default_next_note_id() -> u32 {
+    1
+}
+
+fn default_next_rewrite_id() -> u32 {
     1
 }
 
@@ -154,6 +162,7 @@ pub fn create(file_id: &str, title: &str, description: Option<&str>, content: &s
         assets: vec![],
         notes: vec![],
         next_note_id: 1,
+        next_rewrite_id: 1,
     };
 
     let header_json = serde_json::to_string_pretty(&header).expect("edupage header serialization");
@@ -367,6 +376,125 @@ pub fn add_note(
     new_file.push_str(note_body);
 
     Ok((new_file, new_note))
+}
+
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+/// Replace the `target_n`-th word-bounded occurrence of `selection` on a
+/// single source line with `replacement`. Errors if the selection contains
+/// a newline (multi-line rewrites aren't supported yet). Returns the
+/// 0-indexed line that changed and its new text.
+fn replace_in_line(
+    content: &str,
+    selection: &str,
+    target_n: u32,
+    replacement: &str,
+) -> Result<(usize, String), String> {
+    if selection.contains('\n') {
+        return Err("multi-line selections aren't supported for rewrite yet".to_string());
+    }
+    if target_n == 0 {
+        return Err("occurrence index must be 1 or greater".to_string());
+    }
+    let mut count: u32 = 0;
+    for (line_idx, line) in content.lines().enumerate() {
+        let mut search_start = 0;
+        while let Some(rel_pos) = line[search_start..].find(selection) {
+            let pos = search_start + rel_pos;
+            let end = pos + selection.len();
+
+            let before_is_word = pos > 0
+                && line[..pos]
+                    .chars()
+                    .last()
+                    .map(is_word_char)
+                    .unwrap_or(false);
+            let after_is_word = end < line.len()
+                && line[end..]
+                    .chars()
+                    .next()
+                    .map(is_word_char)
+                    .unwrap_or(false);
+
+            if !before_is_word && !after_is_word {
+                count += 1;
+                if count == target_n {
+                    let new_line =
+                        format!("{}{}{}", &line[..pos], replacement, &line[end..]);
+                    return Ok((line_idx, new_line));
+                }
+            }
+
+            search_start = pos + 1;
+        }
+    }
+    Err(format!(
+        "could not find occurrence {} of '{}'",
+        target_n, selection
+    ))
+}
+
+/// Rewrite the Nth occurrence of `selection` to `replacement`, wrapping
+/// the replacement in `<span data-rewrite-id="N">…</span>` so the renderer
+/// (and selection-touches-rewrite detection) can recognize it later.
+/// Records the change as a single-line EDIT revision and increments the
+/// next_rewrite_id counter. Returns the new file content and the assigned
+/// rewrite id.
+pub fn rewrite_passage(
+    raw: &str,
+    selection: &str,
+    occurrence_index: u32,
+    replacement: &str,
+) -> Result<(String, u32), String> {
+    let (mut header, _) = parse_blocks(raw)?;
+    let rewrite_id = header.next_rewrite_id;
+    header.next_rewrite_id = rewrite_id + 1;
+    let now = chrono::Utc::now().to_rfc3339();
+
+    let content = reconstruct(raw)?;
+    let span_text = format!(
+        r#"<span data-rewrite-id="{}">{}</span>"#,
+        rewrite_id,
+        html_escape(replacement),
+    );
+    let (line_idx, new_line) =
+        replace_in_line(&content, selection, occurrence_index, &span_text)?;
+    let line_number = line_idx + 1;
+
+    let new_sha1 = sha1_hex(&new_line);
+    let file_id = header.id.clone();
+
+    header.revisions.push(RevisionMeta {
+        id: new_sha1.clone(),
+        ctime: now,
+        action_id: uuid::Uuid::new_v4().to_string(),
+        revision_type: RevisionType::Edit,
+        line_start: line_number,
+        line_end: Some(line_number),
+    });
+
+    let header_json = serde_json::to_string_pretty(&header).expect("header serialization");
+    let lines: Vec<&str> = raw.lines().collect();
+    let body_start = lines
+        .iter()
+        .position(|l| parse_delimiter(l).is_some())
+        .ok_or("no delimiter in edupage")?;
+    let existing_body = lines[body_start..].join("\n");
+
+    let mut new_file = header_json;
+    new_file.push('\n');
+    new_file.push_str(&existing_body);
+    new_file.push('\n');
+    new_file.push_str(&delimiter(&file_id, &new_sha1));
+    new_file.push('\n');
+    new_file.push_str(&new_line);
+
+    Ok((new_file, rewrite_id))
 }
 
 /// Insert a `[^A<appendix_seq>]` cross-reference marker after the Nth
@@ -670,6 +798,62 @@ mod tests {
         // body and add its anchor right after.
         assert!(content.contains("[^*1]"));
         assert!(content.contains("[^†2]"));
+    }
+
+    #[test]
+    fn rewrite_passage_wraps_replacement_in_span() {
+        let raw = create("ch-01", "Chapter", None, "The collapse is dramatic.");
+        let (new_raw, id) =
+            rewrite_passage(&raw, "collapse is dramatic", 1, "fall is sudden and total").unwrap();
+        assert_eq!(id, 1);
+        let content = reconstruct(&new_raw).unwrap();
+        assert_eq!(
+            content,
+            r#"The <span data-rewrite-id="1">fall is sudden and total</span>."#
+        );
+    }
+
+    #[test]
+    fn rewrite_passage_increments_id_across_calls() {
+        let raw = create("ch-01", "Chapter", None, "First passage here. Second passage here.");
+        let (raw, id1) = rewrite_passage(&raw, "First passage", 1, "Initial bit").unwrap();
+        let (_, id2) = rewrite_passage(&raw, "Second passage", 1, "Following bit").unwrap();
+        assert_eq!(id1, 1);
+        assert_eq!(id2, 2);
+    }
+
+    #[test]
+    fn rewrite_passage_html_escapes_replacement() {
+        let raw = create("ch-01", "Chapter", None, "See the demo here.");
+        let (new_raw, _) =
+            rewrite_passage(&raw, "demo", 1, "X < Y & Z > W").unwrap();
+        let content = reconstruct(&new_raw).unwrap();
+        assert!(content.contains("X &lt; Y &amp; Z &gt; W"));
+        assert!(!content.contains("X < Y"));
+    }
+
+    #[test]
+    fn rewrite_passage_rejects_multi_line_selection() {
+        let raw = create("ch-01", "Chapter", None, "A line.\nAnother line.");
+        let result = rewrite_passage(&raw, "A line.\nAnother", 1, "X");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rewrite_passage_errors_when_selection_not_found() {
+        let raw = create("ch-01", "Chapter", None, "Just some text.");
+        assert!(rewrite_passage(&raw, "missing phrase", 1, "X").is_err());
+    }
+
+    #[test]
+    fn rewrite_passage_id_never_reused_after_future_features() {
+        // The next_rewrite_id counter advances even if a span is later replaced
+        // (replacement logic isn't here yet, but the counter must be stable).
+        let raw = create("ch-01", "Chapter", None, "A B C D E F.");
+        let (raw, id1) = rewrite_passage(&raw, "A B C", 1, "ABC").unwrap();
+        let (_, id2) = rewrite_passage(&raw, "D E F", 1, "DEF").unwrap();
+        assert_eq!(id1, 1);
+        assert_eq!(id2, 2);
     }
 
     #[test]

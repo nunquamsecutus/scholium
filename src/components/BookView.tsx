@@ -434,6 +434,33 @@ export default function BookView(props: Props) {
     }
   }
 
+  async function handleRewrite(phrase: string, range: Range) {
+    const chapterId = selectedId();
+    const article = articleRef();
+    if (!chapterId || !article) return;
+
+    const occurrence = occurrenceIndex(range, article, phrase);
+    if (occurrence < 0) {
+      setError(`Could not locate "${phrase}" in the chapter source.`);
+      return;
+    }
+
+    const context = paragraphContext(range, article);
+
+    try {
+      const result = await invoke<ChapterContent>("rewrite_passage", {
+        chapterId,
+        selection: phrase,
+        occurrenceIndex: occurrence,
+        context,
+      });
+      setContentCache((c) => ({ ...c, [chapterId]: renderMarkdown(result.content, result.notes) }));
+      setChapterNotes((m) => ({ ...m, [chapterId]: result.notes }));
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
   async function handleAppendix(phrase: string, range: Range) {
     const chapterId = selectedId();
     const article = articleRef();
@@ -626,6 +653,7 @@ export default function BookView(props: Props) {
           onFootnote={handleFootnote}
           onEndnote={handleEndnote}
           onAppendix={handleAppendix}
+          onRewrite={handleRewrite}
         />
 
         <Show when={activeFootnote()}>

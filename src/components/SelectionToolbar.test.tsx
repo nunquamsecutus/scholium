@@ -72,6 +72,28 @@ describe("SelectionToolbar", () => {
     expect(queryByRole("button", { name: "Define" })).not.toBeInTheDocument();
   });
 
+  it("shows I don't understand alongside Tell me more for multi-word selections", async () => {
+    const article = mountArticle();
+    const { findByRole } = render(() => <SelectionToolbar container={() => article} />);
+    selectInside(article, 0, 11);
+    expect(await findByRole("button", { name: "I don't understand" })).toBeInTheDocument();
+  });
+
+  it("I don't understand fires onRewrite with the phrase and range", async () => {
+    const onRewrite = vi.fn();
+    const article = mountArticle();
+    const { findByRole } = render(() => (
+      <SelectionToolbar container={() => article} onRewrite={onRewrite} />
+    ));
+    selectInside(article, 0, 11);
+    fireEvent.click(await findByRole("button", { name: "I don't understand" }));
+
+    expect(onRewrite).toHaveBeenCalledTimes(1);
+    const [phrase, range] = onRewrite.mock.calls[0];
+    expect(phrase).toBe("hello world");
+    expect(range).toBeInstanceOf(Range);
+  });
+
   it("Tell me more reveals the Footnote sub-action", async () => {
     const article = mountArticle();
     const { findByRole } = render(() => <SelectionToolbar container={() => article} />);

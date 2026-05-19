@@ -7,6 +7,7 @@ interface Props {
   onFootnote?: (phrase: string, range: Range) => void;
   onEndnote?: (phrase: string, range: Range) => void;
   onAppendix?: (phrase: string, range: Range) => void;
+  onRewrite?: (phrase: string, range: Range) => void;
 }
 
 type Mode = "primary" | "expand";
@@ -81,6 +82,13 @@ export default function SelectionToolbar(props: Props) {
     props.onAppendix?.(p, r);
   }
 
+  function rewrite() {
+    const p = phrase();
+    const r = range();
+    if (!p || !r) return;
+    props.onRewrite?.(p, r);
+  }
+
   onMount(() => {
     document.addEventListener("selectionchange", update);
     onCleanup(() => document.removeEventListener("selectionchange", update));
@@ -113,6 +121,9 @@ export default function SelectionToolbar(props: Props) {
               onClick={() => setMode("expand")}
             >
               Tell me more
+            </button>
+            <button type="button" class="selection-action" onClick={rewrite}>
+              I don't understand
             </button>
           </Show>
         </Show>

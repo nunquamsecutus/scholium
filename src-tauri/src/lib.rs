@@ -5,6 +5,7 @@ mod expand;
 mod llm;
 mod manifest;
 mod onboarding;
+mod rewrite;
 mod settings;
 
 use settings::{LlmProvider, PublicSettings, Settings};
@@ -371,6 +372,54 @@ async fn add_endnote(
     })
 }
 
+#[tauri::command]
+async fn rewrite_passage(
+    state: tauri::State<'_, AppState>,
+    chapter_id: String,
+    selection: String,
+    occurrence_index: u32,
+    context: String,
+) -> Result<ChapterContent, String> {
+    if selection.trim().is_empty() {
+        return Err("empty selection".to_string());
+    }
+    if context.trim().is_empty() {
+        return Err("empty context".to_string());
+    }
+
+    let book_path = state
+        .book_path
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("no book is open")?;
+    let book = manifest::load(&book_path)?;
+    let reading_level = book.metadata.reading_level.as_deref().unwrap_or("adult");
+    let topic = Some(book.metadata.topic.as_str()).filter(|s| !s.is_empty());
+
+    let settings = state.settings.lock().unwrap().clone();
+    let messages = rewrite::build_rewrite_messages(&selection, &context, reading_level, topic);
+    let raw_llm = dispatch_llm(&settings, messages).await?;
+    let replacement = rewrite::clean_rewrite_response(&raw_llm);
+    if replacement.is_empty() {
+        return Err("model returned an empty rewrite".to_string());
+    }
+
+    let chapter_path = chapter_path_for(&state, &chapter_id)?;
+    let raw_file = std::fs::read_to_string(&chapter_path)
+        .map_err(|e| format!("failed to read chapter: {e}"))?;
+    let (new_raw, _) =
+        edupage::rewrite_passage(&raw_file, &selection, occurrence_index, &replacement)?;
+    std::fs::write(&chapter_path, &new_raw)
+        .map_err(|e| format!("failed to write chapter: {e}"))?;
+
+    let page = edupage::read(&new_raw)?;
+    Ok(ChapterContent {
+        content: page.content,
+        notes: page.notes,
+    })
+}
+
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppendixResult {
@@ -687,6 +736,7 @@ pub fn run() {
             add_appendix,
             add_note,
             delete_note,
+            rewrite_passage,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
