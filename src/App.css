@@ -596,6 +596,62 @@ body {
   outline: none;
 }
 
+/* ── Busy pill (in-flight LLM actions) ──────────────── */
+
+.busy-pill {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: #1a202c;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: #e2e8f0;
+  padding: 10px 18px;
+  border-radius: 999px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  z-index: 250;
+  font-size: 0.875rem;
+}
+
+.book-loader {
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+  overflow: visible;
+}
+
+.book-loader-frame path {
+  fill: #2d3748;
+  stroke: #90cdf4;
+  stroke-width: 1.6;
+  stroke-linejoin: round;
+}
+
+.book-loader-frame line {
+  stroke: #90cdf4;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+}
+
+.book-loader-page {
+  fill: var(--color-primary);
+  stroke: #90cdf4;
+  stroke-width: 1.6;
+  stroke-linejoin: round;
+  transform-box: fill-box;
+  transform-origin: left center;
+  animation: pageflip 1.3s ease-in-out infinite;
+}
+
+@keyframes pageflip {
+  0% { transform: scaleX(1); }
+  50% { transform: scaleX(-1); }
+  100% { transform: scaleX(1); }
+}
+
 /* ── Artifacts (generated SVG illustrations) ────────── */
 
 .artifact {

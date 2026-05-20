@@ -4,6 +4,7 @@ import { marked } from "marked";
 import DOMPurify from "dompurify";
 import type { Chapter, Manifest } from "../types/manifest";
 import SelectionToolbar from "./SelectionToolbar";
+import BookLoader from "./BookLoader";
 
 // Pagination unit comes from the article's clientWidth at runtime — see the
 // page-window / chapter-content split in App.css. The browser fits one column
@@ -219,6 +220,9 @@ export default function BookView(props: Props) {
   const [endnoteReturnPage, setEndnoteReturnPage] = createSignal<number | null>(null);
   const [rewriteDialog, setRewriteDialog] = createSignal<RewriteDialogState | null>(null);
   const [dialogInput, setDialogInput] = createSignal("");
+  // Message shown in the floating busy pill while a highlight-driven LLM
+  // action is in flight; null when idle.
+  const [busy, setBusy] = createSignal<string | null>(null);
   const [generating, setGenerating] = createSignal(false);
   const [error, setError] = createSignal("");
   const [articleRef, setArticleRef] = createSignal<HTMLElement>();
@@ -455,58 +459,65 @@ export default function BookView(props: Props) {
     }
   }
 
-  async function handleFootnote(phrase: string, range: Range) {
+  // Shared wrapper for highlight-driven commands that return a ChapterContent.
+  // Manages the busy indicator and applies the returned content + notes.
+  async function runContentCommand(
+    busyMessage: string,
+    command: string,
+    args: Record<string, unknown>,
+  ) {
     const chapterId = selectedId();
-    const article = articleRef();
-    if (!chapterId || !article) return;
-
-    const occurrence = occurrenceIndex(range, article, phrase);
-    if (occurrence < 0) {
-      setError(`Could not locate "${phrase}" in the chapter source.`);
-      return;
-    }
-
-    const context = paragraphContext(range, article);
-
+    if (!chapterId) return;
+    setBusy(busyMessage);
     try {
-      const result = await invoke<ChapterContent>("add_footnote", {
-        chapterId,
-        selection: phrase,
-        occurrenceIndex: occurrence,
-        context,
-      });
-      setContentCache((c) => ({ ...c, [chapterId]: renderMarkdown(result.content, result.notes, result.artifacts) }));
+      const result = await invoke<ChapterContent>(command, args);
+      setContentCache((c) => ({
+        ...c,
+        [chapterId]: renderMarkdown(result.content, result.notes, result.artifacts),
+      }));
       setChapterNotes((m) => ({ ...m, [chapterId]: result.notes }));
     } catch (e) {
       setError(String(e));
+    } finally {
+      setBusy(null);
     }
   }
 
-  async function handleEndnote(phrase: string, range: Range) {
+  // Resolve the chapter, article, and word-occurrence index shared by every
+  // phrase-driven action. Returns null (after setting an error) if the
+  // selection can't be located in the source.
+  function resolvePhrase(phrase: string, range: Range) {
     const chapterId = selectedId();
     const article = articleRef();
-    if (!chapterId || !article) return;
-
+    if (!chapterId || !article) return null;
     const occurrence = occurrenceIndex(range, article, phrase);
     if (occurrence < 0) {
       setError(`Could not locate "${phrase}" in the chapter source.`);
-      return;
+      return null;
     }
+    return { chapterId, occurrence, context: paragraphContext(range, article) };
+  }
 
-    const context = paragraphContext(range, article);
+  async function handleFootnote(phrase: string, range: Range) {
+    const r = resolvePhrase(phrase, range);
+    if (!r) return;
+    await runContentCommand("Writing footnote…", "add_footnote", {
+      chapterId: r.chapterId,
+      selection: phrase,
+      occurrenceIndex: r.occurrence,
+      context: r.context,
+    });
+  }
 
-    try {
-      const result = await invoke<ChapterContent>("add_endnote", {
-        chapterId,
-        selection: phrase,
-        occurrenceIndex: occurrence,
-        context,
-      });
-      setContentCache((c) => ({ ...c, [chapterId]: renderMarkdown(result.content, result.notes, result.artifacts) }));
-      setChapterNotes((m) => ({ ...m, [chapterId]: result.notes }));
-    } catch (e) {
-      setError(String(e));
-    }
+  async function handleEndnote(phrase: string, range: Range) {
+    const r = resolvePhrase(phrase, range);
+    if (!r) return;
+    await runContentCommand("Writing endnote…", "add_endnote", {
+      chapterId: r.chapterId,
+      selection: phrase,
+      occurrenceIndex: r.occurrence,
+      context: r.context,
+    });
   }
 
   function handleRewriteConversation(rewriteId: number, range: Range) {
@@ -583,127 +594,67 @@ export default function BookView(props: Props) {
   }
 
   async function handleDrawPicture(phrase: string, range: Range) {
-    const chapterId = selectedId();
-    const article = articleRef();
-    if (!chapterId || !article) return;
-
-    const occurrence = occurrenceIndex(range, article, phrase);
-    if (occurrence < 0) {
-      setError(`Could not locate "${phrase}" in the chapter source.`);
-      return;
-    }
-
-    const context = paragraphContext(range, article);
-
-    try {
-      const result = await invoke<ChapterContent>("add_image", {
-        chapterId,
-        selection: phrase,
-        occurrenceIndex: occurrence,
-        context,
-      });
-      setContentCache((c) => ({ ...c, [chapterId]: renderMarkdown(result.content, result.notes, result.artifacts) }));
-      setChapterNotes((m) => ({ ...m, [chapterId]: result.notes }));
-    } catch (e) {
-      setError(String(e));
-    }
+    const r = resolvePhrase(phrase, range);
+    if (!r) return;
+    await runContentCommand("Drawing a picture…", "add_image", {
+      chapterId: r.chapterId,
+      selection: phrase,
+      occurrenceIndex: r.occurrence,
+      context: r.context,
+    });
   }
 
   async function handleRewrite(phrase: string, range: Range) {
-    const chapterId = selectedId();
-    const article = articleRef();
-    if (!chapterId || !article) return;
-
-    const occurrence = occurrenceIndex(range, article, phrase);
-    if (occurrence < 0) {
-      setError(`Could not locate "${phrase}" in the chapter source.`);
-      return;
-    }
-
-    const context = paragraphContext(range, article);
-
-    try {
-      const result = await invoke<ChapterContent>("rewrite_passage", {
-        chapterId,
-        selection: phrase,
-        occurrenceIndex: occurrence,
-        context,
-      });
-      setContentCache((c) => ({ ...c, [chapterId]: renderMarkdown(result.content, result.notes, result.artifacts) }));
-      setChapterNotes((m) => ({ ...m, [chapterId]: result.notes }));
-    } catch (e) {
-      setError(String(e));
-    }
+    const r = resolvePhrase(phrase, range);
+    if (!r) return;
+    await runContentCommand("Rewriting…", "rewrite_passage", {
+      chapterId: r.chapterId,
+      selection: phrase,
+      occurrenceIndex: r.occurrence,
+      context: r.context,
+    });
   }
 
   async function handleAppendix(phrase: string, range: Range) {
-    const chapterId = selectedId();
-    const article = articleRef();
-    if (!chapterId || !article) return;
-
-    const occurrence = occurrenceIndex(range, article, phrase);
-    if (occurrence < 0) {
-      setError(`Could not locate "${phrase}" in the chapter source.`);
-      return;
-    }
-
-    const context = paragraphContext(range, article);
-
+    const r = resolvePhrase(phrase, range);
+    if (!r) return;
+    setBusy("Writing appendix…");
     try {
       const result = await invoke<AppendixResult>("add_appendix", {
-        chapterId,
+        chapterId: r.chapterId,
         selection: phrase,
-        occurrenceIndex: occurrence,
-        context,
+        occurrenceIndex: r.occurrence,
+        context: r.context,
       });
       setManifest(result.manifest);
-      setContentCache((c) => ({ ...c, [chapterId]: renderMarkdown(result.content, result.notes, result.artifacts) }));
-      setChapterNotes((m) => ({ ...m, [chapterId]: result.notes }));
+      setContentCache((c) => ({
+        ...c,
+        [r.chapterId]: renderMarkdown(result.content, result.notes, result.artifacts),
+      }));
+      setChapterNotes((m) => ({ ...m, [r.chapterId]: result.notes }));
     } catch (e) {
       setError(String(e));
+    } finally {
+      setBusy(null);
     }
   }
 
   async function handleDeleteNote(noteId: number) {
-    const chapterId = selectedId();
-    if (!chapterId) return;
-    try {
-      const result = await invoke<ChapterContent>("delete_note", {
-        chapterId,
-        noteId,
-      });
-      setContentCache((c) => ({ ...c, [chapterId]: renderMarkdown(result.content, result.notes, result.artifacts) }));
-      setChapterNotes((m) => ({ ...m, [chapterId]: result.notes }));
-    } catch (e) {
-      setError(String(e));
-    }
+    await runContentCommand("Removing note…", "delete_note", {
+      chapterId: selectedId(),
+      noteId,
+    });
   }
 
   async function handleDefine(word: string, range: Range) {
-    const chapterId = selectedId();
-    const article = articleRef();
-    if (!chapterId || !article) return;
-
-    const occurrence = occurrenceIndex(range, article, word);
-    if (occurrence < 0) {
-      setError(`Could not locate "${word}" in the chapter source.`);
-      return;
-    }
-
-    const context = paragraphContext(range, article);
-
-    try {
-      const result = await invoke<ChapterContent>("define_word", {
-        chapterId,
-        word,
-        occurrenceIndex: occurrence,
-        context,
-      });
-      setContentCache((c) => ({ ...c, [chapterId]: renderMarkdown(result.content, result.notes, result.artifacts) }));
-      setChapterNotes((m) => ({ ...m, [chapterId]: result.notes }));
-    } catch (e) {
-      setError(String(e));
-    }
+    const r = resolvePhrase(word, range);
+    if (!r) return;
+    await runContentCommand("Looking up definition…", "define_word", {
+      chapterId: r.chapterId,
+      word,
+      occurrenceIndex: r.occurrence,
+      context: r.context,
+    });
   }
 
   return (
@@ -832,6 +783,13 @@ export default function BookView(props: Props) {
           onRewriteConversation={handleRewriteConversation}
           onDrawPicture={handleDrawPicture}
         />
+
+        <Show when={busy()}>
+          <div class="busy-pill" role="status" aria-live="polite">
+            <BookLoader />
+            {busy()}
+          </div>
+        </Show>
 
         <Show when={rewriteDialog()}>
           <div
