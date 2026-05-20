@@ -122,6 +122,21 @@ describe("SelectionToolbar", () => {
     expect(r).toBeInstanceOf(Range);
   });
 
+  it("Draw a picture fires onDrawPicture with the phrase and range", async () => {
+    const onDrawPicture = vi.fn();
+    const article = mountArticle();
+    const { findByRole } = render(() => (
+      <SelectionToolbar container={() => article} onDrawPicture={onDrawPicture} />
+    ));
+    selectInside(article, 0, 11);
+    fireEvent.click(await findByRole("button", { name: "Draw a picture" }));
+
+    expect(onDrawPicture).toHaveBeenCalledTimes(1);
+    const [phrase, range] = onDrawPicture.mock.calls[0];
+    expect(phrase).toBe("hello world");
+    expect(range).toBeInstanceOf(Range);
+  });
+
   it("I don't understand fires onRewrite with the phrase and range", async () => {
     const onRewrite = vi.fn();
     const article = mountArticle();

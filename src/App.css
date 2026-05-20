@@ -596,6 +596,40 @@ body {
   outline: none;
 }
 
+/* ── Artifacts (generated SVG illustrations) ────────── */
+
+.artifact {
+  margin: 18px 0;
+  break-inside: avoid;
+}
+
+.artifact svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: 360px;
+}
+
+.artifact-block {
+  display: block;
+  width: 100%;
+}
+
+.artifact-float {
+  float: right;
+  width: 45%;
+  max-width: 45%;
+  margin: 4px 0 12px 16px;
+}
+
+.artifact figcaption {
+  margin-top: 6px;
+  font-size: 0.8rem;
+  color: #a0aec0;
+  text-align: center;
+  line-height: 1.4;
+}
+
 /* ── Rewrite conversation dialog ────────────────────── */
 
 .rewrite-dialog-backdrop {

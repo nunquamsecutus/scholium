@@ -2,6 +2,7 @@ mod chapter;
 mod define;
 mod edupage;
 mod expand;
+mod image;
 mod llm;
 mod manifest;
 mod onboarding;
@@ -173,10 +174,7 @@ fn read_chapter(
     let raw = std::fs::read_to_string(&chapter_path)
         .map_err(|e| format!("failed to read chapter: {e}"))?;
     let page = edupage::read(&raw)?;
-    Ok(ChapterContent {
-        content: page.content,
-        notes: page.notes,
-    })
+    Ok(ChapterContent::from_page(page))
 }
 
 // ── Definition (LLM, context-aware) ──────────────────────────────────────────
@@ -228,10 +226,7 @@ async fn define_word(
         .map_err(|e| format!("failed to write chapter: {e}"))?;
 
     let page = edupage::read(&new_raw)?;
-    Ok(ChapterContent {
-        content: page.content,
-        notes: page.notes,
-    })
+    Ok(ChapterContent::from_page(page))
 }
 
 // ── Notes (marginalia / footnotes / endnotes) ─────────────────────────────────
@@ -241,6 +236,17 @@ async fn define_word(
 pub struct ChapterContent {
     pub content: String,
     pub notes: Vec<edupage::NoteWithBody>,
+    pub artifacts: Vec<edupage::ArtifactWithBody>,
+}
+
+impl ChapterContent {
+    fn from_page(page: edupage::EduPage) -> Self {
+        ChapterContent {
+            content: page.content,
+            notes: page.notes,
+            artifacts: page.artifacts,
+        }
+    }
 }
 
 fn chapter_path_for(
@@ -313,10 +319,7 @@ async fn add_footnote(
         .map_err(|e| format!("failed to write chapter: {e}"))?;
 
     let page = edupage::read(&new_raw)?;
-    Ok(ChapterContent {
-        content: page.content,
-        notes: page.notes,
-    })
+    Ok(ChapterContent::from_page(page))
 }
 
 #[tauri::command]
@@ -366,10 +369,57 @@ async fn add_endnote(
         .map_err(|e| format!("failed to write chapter: {e}"))?;
 
     let page = edupage::read(&new_raw)?;
-    Ok(ChapterContent {
-        content: page.content,
-        notes: page.notes,
-    })
+    Ok(ChapterContent::from_page(page))
+}
+
+#[tauri::command]
+async fn add_image(
+    state: tauri::State<'_, AppState>,
+    chapter_id: String,
+    selection: String,
+    occurrence_index: u32,
+    context: String,
+) -> Result<ChapterContent, String> {
+    if selection.trim().is_empty() {
+        return Err("empty selection".to_string());
+    }
+    if context.trim().is_empty() {
+        return Err("empty context".to_string());
+    }
+
+    let book_path = state
+        .book_path
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("no book is open")?;
+    let book = manifest::load(&book_path)?;
+    let reading_level = book.metadata.reading_level.as_deref().unwrap_or("adult");
+    let topic = Some(book.metadata.topic.as_str()).filter(|s| !s.is_empty());
+
+    let settings = state.settings.lock().unwrap().clone();
+    let messages = image::build_image_messages(&selection, &context, reading_level, topic);
+    let raw_llm = dispatch_llm(&settings, messages).await?;
+    let generated = image::parse_image_response(&raw_llm)?;
+    let aspect = image::aspect_ratio_of(&generated.svg);
+
+    let chapter_path = chapter_path_for(&state, &chapter_id)?;
+    let raw_file = std::fs::read_to_string(&chapter_path)
+        .map_err(|e| format!("failed to read chapter: {e}"))?;
+    let (new_raw, _) = edupage::add_artifact(
+        &raw_file,
+        &selection,
+        occurrence_index,
+        &generated.svg,
+        &generated.caption,
+        aspect,
+        "image",
+    )?;
+    std::fs::write(&chapter_path, &new_raw)
+        .map_err(|e| format!("failed to write chapter: {e}"))?;
+
+    let page = edupage::read(&new_raw)?;
+    Ok(ChapterContent::from_page(page))
 }
 
 #[tauri::command]
@@ -414,10 +464,7 @@ async fn rewrite_passage(
         .map_err(|e| format!("failed to write chapter: {e}"))?;
 
     let page = edupage::read(&new_raw)?;
-    Ok(ChapterContent {
-        content: page.content,
-        notes: page.notes,
-    })
+    Ok(ChapterContent::from_page(page))
 }
 
 #[tauri::command]
@@ -492,10 +539,7 @@ async fn rewrite_with_conversation(
         .map_err(|e| format!("failed to write chapter: {e}"))?;
 
     let page = edupage::read(&new_raw)?;
-    Ok(ChapterContent {
-        content: page.content,
-        notes: page.notes,
-    })
+    Ok(ChapterContent::from_page(page))
 }
 
 #[derive(serde::Serialize)]
@@ -503,6 +547,7 @@ async fn rewrite_with_conversation(
 pub struct AppendixResult {
     pub content: String,
     pub notes: Vec<edupage::NoteWithBody>,
+    pub artifacts: Vec<edupage::ArtifactWithBody>,
     pub manifest: manifest::Manifest,
 }
 
@@ -612,6 +657,7 @@ async fn add_appendix(
     Ok(AppendixResult {
         content: page.content,
         notes: page.notes,
+        artifacts: page.artifacts,
         manifest: book,
     })
 }
@@ -629,10 +675,7 @@ fn delete_note(
     std::fs::write(&chapter_path, &new_raw)
         .map_err(|e| format!("failed to write chapter: {e}"))?;
     let page = edupage::read(&new_raw)?;
-    Ok(ChapterContent {
-        content: page.content,
-        notes: page.notes,
-    })
+    Ok(ChapterContent::from_page(page))
 }
 
 #[tauri::command]
@@ -659,10 +702,7 @@ fn add_note(
         .map_err(|e| format!("failed to write chapter: {e}"))?;
 
     let page = edupage::read(&new_raw)?;
-    Ok(ChapterContent {
-        content: page.content,
-        notes: page.notes,
-    })
+    Ok(ChapterContent::from_page(page))
 }
 
 // ── Book management ───────────────────────────────────────────────────────────
@@ -817,6 +857,7 @@ pub fn run() {
             rewrite_passage,
             converse_about_rewrite,
             rewrite_with_conversation,
+            add_image,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

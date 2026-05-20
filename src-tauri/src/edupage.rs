@@ -22,6 +22,11 @@ pub struct EdupageHeader {
     /// as next_note_id — ids are never reused.
     #[serde(default = "default_next_rewrite_id")]
     pub next_rewrite_id: u32,
+    #[serde(default)]
+    pub artifacts: Vec<ArtifactMeta>,
+    /// Monotonically increasing id allocator for artifacts. Never reused.
+    #[serde(default = "default_next_artifact_id")]
+    pub next_artifact_id: u32,
 }
 
 fn default_next_note_id() -> u32 {
@@ -29,6 +34,10 @@ fn default_next_note_id() -> u32 {
 }
 
 fn default_next_rewrite_id() -> u32 {
+    1
+}
+
+fn default_next_artifact_id() -> u32 {
     1
 }
 
@@ -108,10 +117,41 @@ pub struct NoteWithBody {
     pub body: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactMeta {
+    pub id: u32,
+    pub mime_type: String,
+    /// "image" for now; later "diagram", "chart", etc.
+    pub semantic_type: String,
+    pub ctime: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub caption: Option<String>,
+    /// width / height from the SVG viewBox, precomputed so the renderer
+    /// doesn't have to re-parse on every load. Drives block vs float layout.
+    pub aspect_ratio: f32,
+    /// The text the artifact was generated from (for re-generation later).
+    pub source: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactWithBody {
+    pub id: u32,
+    pub mime_type: String,
+    pub semantic_type: String,
+    pub ctime: String,
+    pub caption: Option<String>,
+    pub aspect_ratio: f32,
+    pub source: String,
+    pub body: String,
+}
+
 #[derive(Debug, Serialize)]
 pub struct EduPage {
     pub content: String,
     pub notes: Vec<NoteWithBody>,
+    pub artifacts: Vec<ArtifactWithBody>,
 }
 
 fn sha1_hex(content: &str) -> String {
@@ -126,6 +166,10 @@ fn delimiter(file_id: &str, sha1: &str) -> String {
 
 fn note_delimiter(file_id: &str, note_id: u32) -> String {
     format!("======! {}|NOTE:{} !======", file_id, note_id)
+}
+
+fn artifact_delimiter(file_id: &str, artifact_id: u32) -> String {
+    format!("======! {}|ARTIFACT:{} !======", file_id, artifact_id)
 }
 
 fn parse_delimiter(line: &str) -> Option<(String, String)> {
@@ -163,6 +207,8 @@ pub fn create(file_id: &str, title: &str, description: Option<&str>, content: &s
         notes: vec![],
         next_note_id: 1,
         next_rewrite_id: 1,
+        artifacts: vec![],
+        next_artifact_id: 1,
     };
 
     let header_json = serde_json::to_string_pretty(&header).expect("edupage header serialization");
@@ -251,7 +297,30 @@ pub fn read(raw: &str) -> Result<EduPage, String> {
         })
         .collect();
 
-    Ok(EduPage { content, notes })
+    let artifacts: Vec<ArtifactWithBody> = header
+        .artifacts
+        .iter()
+        .map(|meta| {
+            let key = format!("ARTIFACT:{}", meta.id);
+            let body = blocks.get(&key).cloned().unwrap_or_default();
+            ArtifactWithBody {
+                id: meta.id,
+                mime_type: meta.mime_type.clone(),
+                semantic_type: meta.semantic_type.clone(),
+                ctime: meta.ctime.clone(),
+                caption: meta.caption.clone(),
+                aspect_ratio: meta.aspect_ratio,
+                source: meta.source.clone(),
+                body,
+            }
+        })
+        .collect();
+
+    Ok(EduPage {
+        content,
+        notes,
+        artifacts,
+    })
 }
 
 /// Insert `anchor` after the `target_n`-th word-bounded occurrence of
@@ -567,6 +636,128 @@ pub fn rewrite_existing_span(
     new_file.push_str(&new_line);
 
     Ok((new_file, new_id))
+}
+
+/// Return the 0-indexed line containing the `target_n`-th word-bounded
+/// occurrence of `query`.
+fn line_of_occurrence(content: &str, query: &str, target_n: u32) -> Result<usize, String> {
+    let mut count: u32 = 0;
+    for (line_idx, line) in content.lines().enumerate() {
+        let mut search_start = 0;
+        while let Some(rel_pos) = line[search_start..].find(query) {
+            let pos = search_start + rel_pos;
+            let end = pos + query.len();
+            let before_is_word = pos > 0
+                && line[..pos].chars().last().map(is_word_char).unwrap_or(false);
+            let after_is_word = end < line.len()
+                && line[end..].chars().next().map(is_word_char).unwrap_or(false);
+            if !before_is_word && !after_is_word {
+                count += 1;
+                if count == target_n {
+                    return Ok(line_idx);
+                }
+            }
+            search_start = pos + 1;
+        }
+    }
+    Err(format!(
+        "could not find occurrence {} of '{}'",
+        target_n, query
+    ))
+}
+
+/// Strip characters that would break markdown image alt text / link syntax.
+fn sanitize_alt(s: &str) -> String {
+    s.chars()
+        .filter(|c| !matches!(c, '[' | ']' | '(' | ')' | '\n' | '\r'))
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+/// Add an SVG artifact: store the SVG in an ARTIFACT block, record metadata
+/// in the header, and place a markdown image (`![alt](epar://<id>)`) near the
+/// Nth occurrence of `selection`. Wide images (aspect_ratio >= 1) go on their
+/// own paragraph after the source line; tall images go inline right after the
+/// selection so the renderer can float them beside the text. Recorded as a
+/// single EDIT revision (which may expand one source line into several).
+pub fn add_artifact(
+    raw: &str,
+    selection: &str,
+    occurrence_index: u32,
+    svg: &str,
+    caption: &str,
+    aspect_ratio: f32,
+    semantic_type: &str,
+) -> Result<(String, ArtifactMeta), String> {
+    let (mut header, _) = parse_blocks(raw)?;
+    let artifact_id = header.next_artifact_id;
+    header.next_artifact_id = artifact_id + 1;
+    let now = chrono::Utc::now().to_rfc3339();
+
+    let content = reconstruct(raw)?;
+    let alt = sanitize_alt(caption);
+    let image_md = format!("![{}](epar://{})", alt, artifact_id);
+
+    let (line_idx, new_block) = if aspect_ratio >= 1.0 {
+        // Wide: a block image on its own paragraph after the source line.
+        let idx = line_of_occurrence(&content, selection, occurrence_index)?;
+        let line = content.lines().nth(idx).unwrap_or("");
+        (idx, format!("{}\n\n{}", line, image_md))
+    } else {
+        // Tall: inline right after the selection, so it can float beside text.
+        insert_anchor(&content, selection, occurrence_index, &format!(" {}", image_md))?
+    };
+    let line_number = line_idx + 1;
+
+    let new_sha1 = sha1_hex(&new_block);
+    let file_id = header.id.clone();
+
+    header.revisions.push(RevisionMeta {
+        id: new_sha1.clone(),
+        ctime: now.clone(),
+        action_id: uuid::Uuid::new_v4().to_string(),
+        revision_type: RevisionType::Edit,
+        line_start: line_number,
+        line_end: Some(line_number),
+    });
+
+    let artifact = ArtifactMeta {
+        id: artifact_id,
+        mime_type: "image/svg+xml".to_string(),
+        semantic_type: semantic_type.to_string(),
+        ctime: now,
+        caption: if caption.trim().is_empty() {
+            None
+        } else {
+            Some(caption.trim().to_string())
+        },
+        aspect_ratio,
+        source: selection.to_string(),
+    };
+    header.artifacts.push(artifact.clone());
+
+    let header_json = serde_json::to_string_pretty(&header).expect("header serialization");
+    let lines: Vec<&str> = raw.lines().collect();
+    let body_start = lines
+        .iter()
+        .position(|l| parse_delimiter(l).is_some())
+        .ok_or("no delimiter in edupage")?;
+    let existing_body = lines[body_start..].join("\n");
+
+    let mut new_file = header_json;
+    new_file.push('\n');
+    new_file.push_str(&existing_body);
+    new_file.push('\n');
+    new_file.push_str(&delimiter(&file_id, &new_sha1));
+    new_file.push('\n');
+    new_file.push_str(&new_block);
+    new_file.push('\n');
+    new_file.push_str(&artifact_delimiter(&file_id, artifact_id));
+    new_file.push('\n');
+    new_file.push_str(svg);
+
+    Ok((new_file, artifact))
 }
 
 /// Insert a `[^A<appendix_seq>]` cross-reference marker after the Nth
@@ -953,6 +1144,83 @@ mod tests {
         let (_, id2) = rewrite_passage(&raw, "D E F", 1, "DEF").unwrap();
         assert_eq!(id1, 1);
         assert_eq!(id2, 2);
+    }
+
+    const SVG: &str = r#"<svg viewBox="0 0 100 50"><rect width="100" height="50"/></svg>"#;
+
+    #[test]
+    fn add_artifact_wide_places_image_on_its_own_paragraph() {
+        let raw = create("ch-01", "Chapter", None, "The collapse is shown here.");
+        let (new_raw, art) =
+            add_artifact(&raw, "collapse", 1, SVG, "A collapsing star", 2.0, "image").unwrap();
+        assert_eq!(art.id, 1);
+        let content = reconstruct(&new_raw).unwrap();
+        assert_eq!(
+            content,
+            "The collapse is shown here.\n\n![A collapsing star](epar://1)"
+        );
+    }
+
+    #[test]
+    fn add_artifact_tall_places_image_inline() {
+        let raw = create("ch-01", "Chapter", None, "The collapse is shown here.");
+        let (new_raw, _) =
+            add_artifact(&raw, "collapse", 1, SVG, "Tall image", 0.5, "image").unwrap();
+        let content = reconstruct(&new_raw).unwrap();
+        assert_eq!(
+            content,
+            "The collapse ![Tall image](epar://1) is shown here."
+        );
+    }
+
+    #[test]
+    fn add_artifact_stores_svg_and_metadata() {
+        let raw = create("ch-01", "Chapter", None, "The collapse is shown here.");
+        let (new_raw, art) =
+            add_artifact(&raw, "collapse", 1, SVG, "A collapsing star", 2.0, "image").unwrap();
+        assert!(new_raw.contains("======! ch-01|ARTIFACT:1 !======"));
+        assert!(new_raw.contains(SVG));
+        assert_eq!(art.mime_type, "image/svg+xml");
+        assert_eq!(art.semantic_type, "image");
+        assert_eq!(art.aspect_ratio, 2.0);
+        assert_eq!(art.source, "collapse");
+
+        let page = read(&new_raw).unwrap();
+        assert_eq!(page.artifacts.len(), 1);
+        assert_eq!(page.artifacts[0].body, SVG);
+        assert_eq!(page.artifacts[0].caption.as_deref(), Some("A collapsing star"));
+    }
+
+    #[test]
+    fn add_artifact_increments_id() {
+        let raw = create("ch-01", "Chapter", None, "First spot and second spot here.");
+        let (raw, a1) = add_artifact(&raw, "First spot", 1, SVG, "one", 2.0, "image").unwrap();
+        let (_, a2) = add_artifact(&raw, "second spot", 1, SVG, "two", 2.0, "image").unwrap();
+        assert_eq!(a1.id, 1);
+        assert_eq!(a2.id, 2);
+    }
+
+    #[test]
+    fn add_artifact_sanitizes_alt_text() {
+        let raw = create("ch-01", "Chapter", None, "The collapse here.");
+        let (new_raw, _) =
+            add_artifact(&raw, "collapse", 1, SVG, "weird [brackets] (parens)", 2.0, "image")
+                .unwrap();
+        let content = reconstruct(&new_raw).unwrap();
+        // Alt text has brackets/parens stripped so markdown stays valid.
+        assert!(content.contains("![weird brackets parens](epar://1)"));
+        // But the stored caption keeps the original text.
+        let page = read(&new_raw).unwrap();
+        assert_eq!(
+            page.artifacts[0].caption.as_deref(),
+            Some("weird [brackets] (parens)")
+        );
+    }
+
+    #[test]
+    fn add_artifact_errors_when_selection_missing() {
+        let raw = create("ch-01", "Chapter", None, "Nothing relevant here.");
+        assert!(add_artifact(&raw, "absent phrase", 1, SVG, "x", 2.0, "image").is_err());
     }
 
     #[test]

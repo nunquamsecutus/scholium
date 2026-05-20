@@ -9,6 +9,7 @@ interface Props {
   onAppendix?: (phrase: string, range: Range) => void;
   onRewrite?: (phrase: string, range: Range) => void;
   onRewriteConversation?: (rewriteId: number, range: Range) => void;
+  onDrawPicture?: (phrase: string, range: Range) => void;
 }
 
 type Mode = "primary" | "expand";
@@ -112,6 +113,13 @@ export default function SelectionToolbar(props: Props) {
     }
   }
 
+  function drawPicture() {
+    const p = phrase();
+    const r = range();
+    if (!p || !r) return;
+    props.onDrawPicture?.(p, r);
+  }
+
   onMount(() => {
     document.addEventListener("selectionchange", update);
     onCleanup(() => document.removeEventListener("selectionchange", update));
@@ -147,6 +155,9 @@ export default function SelectionToolbar(props: Props) {
             </button>
             <button type="button" class="selection-action" onClick={rewrite}>
               {touchedRewriteId() !== null ? "I still don't understand" : "I don't understand"}
+            </button>
+            <button type="button" class="selection-action" onClick={drawPicture}>
+              Draw a picture
             </button>
           </Show>
         </Show>

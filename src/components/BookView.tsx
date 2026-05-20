@@ -24,9 +24,21 @@ interface NoteFromBackend {
   body: string;
 }
 
+interface ArtifactFromBackend {
+  id: number;
+  mimeType: string;
+  semanticType: string;
+  ctime: string;
+  caption: string | null;
+  aspectRatio: number;
+  source: string;
+  body: string;
+}
+
 interface ChapterContent {
   content: string;
   notes: NoteFromBackend[];
+  artifacts: ArtifactFromBackend[];
 }
 
 interface AppendixResult extends ChapterContent {
@@ -73,8 +85,49 @@ function labelForNote(note: NoteFromBackend | undefined, id: string): string {
 // `[^A<seq>]` = appendix cross-reference (link to chapter `ap-<seq>`).
 const ANCHOR_RE = /\[\^([*†‡A])(\d+)\]/g;
 
-function renderMarkdown(md: string, notes: NoteFromBackend[]): string {
-  const html = DOMPurify.sanitize(marked.parse(md) as string);
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+// Replace `epar://<id>` markdown images (rendered by marked as
+// `<img src="epar://N">`) with a <figure> carrying the artifact's SVG. Runs
+// BEFORE sanitize so the injected SVG passes through DOMPurify (which strips
+// the non-standard epar:// scheme but allows SVG elements). Block vs float is
+// driven by the artifact's aspect ratio.
+function inlineArtifacts(html: string, artifacts: ArtifactFromBackend[]): string {
+  if (artifacts.length === 0) return html;
+  const byId = new Map<number, ArtifactFromBackend>(artifacts.map((a) => [a.id, a]));
+
+  const figureFor = (imgTag: string): string | null => {
+    const srcMatch = imgTag.match(/src="epar:\/\/(\d+)"/);
+    if (!srcMatch) return null;
+    const a = byId.get(Number(srcMatch[1]));
+    if (!a) return `<!-- missing artifact ${srcMatch[1]} -->`;
+    const cls = a.aspectRatio >= 1 ? "artifact artifact-block" : "artifact artifact-float";
+    const caption = a.caption ? `<figcaption>${escapeHtml(a.caption)}</figcaption>` : "";
+    return `<figure class="${cls}" data-artifact-id="${a.id}">${a.body}${caption}</figure>`;
+  };
+
+  // Paragraph-wrapped images become block figures (avoids <figure> inside <p>).
+  let out = html.replace(/<p>\s*(<img\b[^>]*>)\s*<\/p>/g, (whole, imgTag) => {
+    return figureFor(imgTag) ?? whole;
+  });
+  // Any remaining inline images.
+  out = out.replace(/<img\b[^>]*>/g, (imgTag) => figureFor(imgTag) ?? imgTag);
+  return out;
+}
+
+function renderMarkdown(
+  md: string,
+  notes: NoteFromBackend[],
+  artifacts: ArtifactFromBackend[] = [],
+): string {
+  const withArtifacts = inlineArtifacts(marked.parse(md) as string, artifacts);
+  const html = DOMPurify.sanitize(withArtifacts);
   const byId = new Map<number, NoteFromBackend>(notes.map((n) => [n.id, n]));
   let processed = html.replace(ANCHOR_RE, (_, marker, id) => {
     if (marker === "A") {
@@ -357,7 +410,7 @@ export default function BookView(props: Props) {
     if (ch.status === "generated" && !contentCache()[ch.id]) {
       try {
         const result = await invoke<ChapterContent>("read_chapter", { chapterId: ch.id });
-        setContentCache((c) => ({ ...c, [ch.id]: renderMarkdown(result.content, result.notes) }));
+        setContentCache((c) => ({ ...c, [ch.id]: renderMarkdown(result.content, result.notes, result.artifacts) }));
         setChapterNotes((m) => ({ ...m, [ch.id]: result.notes }));
       } catch (e) {
         setError(String(e));
@@ -382,7 +435,7 @@ export default function BookView(props: Props) {
     try {
       const result = await invoke<GenerateResult>("generate_chapter", { chapterId });
       setManifest(result.manifest);
-      setContentCache((c) => ({ ...c, [chapterId]: renderMarkdown(result.content, []) }));
+      setContentCache((c) => ({ ...c, [chapterId]: renderMarkdown(result.content, [], []) }));
       setChapterNotes((m) => ({ ...m, [chapterId]: [] }));
       setSelectedId(chapterId);
       setCurrentPage(0);
@@ -422,7 +475,7 @@ export default function BookView(props: Props) {
         occurrenceIndex: occurrence,
         context,
       });
-      setContentCache((c) => ({ ...c, [chapterId]: renderMarkdown(result.content, result.notes) }));
+      setContentCache((c) => ({ ...c, [chapterId]: renderMarkdown(result.content, result.notes, result.artifacts) }));
       setChapterNotes((m) => ({ ...m, [chapterId]: result.notes }));
     } catch (e) {
       setError(String(e));
@@ -449,7 +502,7 @@ export default function BookView(props: Props) {
         occurrenceIndex: occurrence,
         context,
       });
-      setContentCache((c) => ({ ...c, [chapterId]: renderMarkdown(result.content, result.notes) }));
+      setContentCache((c) => ({ ...c, [chapterId]: renderMarkdown(result.content, result.notes, result.artifacts) }));
       setChapterNotes((m) => ({ ...m, [chapterId]: result.notes }));
     } catch (e) {
       setError(String(e));
@@ -520,12 +573,39 @@ export default function BookView(props: Props) {
         context: dialog.context,
         history: dialog.messages,
       });
-      setContentCache((c) => ({ ...c, [chapterId]: renderMarkdown(result.content, result.notes) }));
+      setContentCache((c) => ({ ...c, [chapterId]: renderMarkdown(result.content, result.notes, result.artifacts) }));
       setChapterNotes((m) => ({ ...m, [chapterId]: result.notes }));
       setRewriteDialog(null);
     } catch (e) {
       setError(String(e));
       setRewriteDialog((d) => (d ? { ...d, sending: false } : null));
+    }
+  }
+
+  async function handleDrawPicture(phrase: string, range: Range) {
+    const chapterId = selectedId();
+    const article = articleRef();
+    if (!chapterId || !article) return;
+
+    const occurrence = occurrenceIndex(range, article, phrase);
+    if (occurrence < 0) {
+      setError(`Could not locate "${phrase}" in the chapter source.`);
+      return;
+    }
+
+    const context = paragraphContext(range, article);
+
+    try {
+      const result = await invoke<ChapterContent>("add_image", {
+        chapterId,
+        selection: phrase,
+        occurrenceIndex: occurrence,
+        context,
+      });
+      setContentCache((c) => ({ ...c, [chapterId]: renderMarkdown(result.content, result.notes, result.artifacts) }));
+      setChapterNotes((m) => ({ ...m, [chapterId]: result.notes }));
+    } catch (e) {
+      setError(String(e));
     }
   }
 
@@ -549,7 +629,7 @@ export default function BookView(props: Props) {
         occurrenceIndex: occurrence,
         context,
       });
-      setContentCache((c) => ({ ...c, [chapterId]: renderMarkdown(result.content, result.notes) }));
+      setContentCache((c) => ({ ...c, [chapterId]: renderMarkdown(result.content, result.notes, result.artifacts) }));
       setChapterNotes((m) => ({ ...m, [chapterId]: result.notes }));
     } catch (e) {
       setError(String(e));
@@ -577,7 +657,7 @@ export default function BookView(props: Props) {
         context,
       });
       setManifest(result.manifest);
-      setContentCache((c) => ({ ...c, [chapterId]: renderMarkdown(result.content, result.notes) }));
+      setContentCache((c) => ({ ...c, [chapterId]: renderMarkdown(result.content, result.notes, result.artifacts) }));
       setChapterNotes((m) => ({ ...m, [chapterId]: result.notes }));
     } catch (e) {
       setError(String(e));
@@ -592,7 +672,7 @@ export default function BookView(props: Props) {
         chapterId,
         noteId,
       });
-      setContentCache((c) => ({ ...c, [chapterId]: renderMarkdown(result.content, result.notes) }));
+      setContentCache((c) => ({ ...c, [chapterId]: renderMarkdown(result.content, result.notes, result.artifacts) }));
       setChapterNotes((m) => ({ ...m, [chapterId]: result.notes }));
     } catch (e) {
       setError(String(e));
@@ -619,7 +699,7 @@ export default function BookView(props: Props) {
         occurrenceIndex: occurrence,
         context,
       });
-      setContentCache((c) => ({ ...c, [chapterId]: renderMarkdown(result.content, result.notes) }));
+      setContentCache((c) => ({ ...c, [chapterId]: renderMarkdown(result.content, result.notes, result.artifacts) }));
       setChapterNotes((m) => ({ ...m, [chapterId]: result.notes }));
     } catch (e) {
       setError(String(e));
@@ -750,6 +830,7 @@ export default function BookView(props: Props) {
           onAppendix={handleAppendix}
           onRewrite={handleRewrite}
           onRewriteConversation={handleRewriteConversation}
+          onDrawPicture={handleDrawPicture}
         />
 
         <Show when={rewriteDialog()}>
