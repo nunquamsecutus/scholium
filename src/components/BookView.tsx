@@ -230,6 +230,11 @@ export default function BookView(props: Props) {
     rect: { top: number; left: number; width: number; height: number };
   } | null>(null);
   const [confirmingArtifactDelete, setConfirmingArtifactDelete] = createSignal(false);
+  // Edit-image modal: the artifact id + surrounding context, the instruction
+  // text, and whether the regenerate request is in flight.
+  const [editArtifact, setEditArtifact] = createSignal<{ id: number; context: string } | null>(null);
+  const [editInstruction, setEditInstruction] = createSignal("");
+  const [editSending, setEditSending] = createSignal(false);
   const [generating, setGenerating] = createSignal(false);
   const [error, setError] = createSignal("");
   const [articleRef, setArticleRef] = createSignal<HTMLElement>();
@@ -326,6 +331,13 @@ export default function BookView(props: Props) {
   // turn pages.
   onMount(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (editArtifact()) {
+        if (e.key === "Escape" && !editSending()) {
+          setEditArtifact(null);
+          e.preventDefault();
+        }
+        return;
+      }
       if (rewriteDialog()) {
         if (e.key === "Escape" && !rewriteDialog()!.sending) {
           setRewriteDialog(null);
@@ -435,6 +447,50 @@ export default function BookView(props: Props) {
       chapterId: selectedId(),
       artifactId,
     });
+  }
+
+  function openEditArtifact(artifactId: number) {
+    const article = articleRef();
+    const figure = article?.querySelector(
+      `[data-artifact-id="${artifactId}"]`,
+    ) as HTMLElement | null;
+    // Context for the model: the paragraph the float sits in, or the block
+    // image's preceding paragraph.
+    const context =
+      figure?.closest("p")?.textContent ??
+      figure?.previousElementSibling?.textContent ??
+      "";
+    setActiveArtifact(null);
+    setEditArtifact({ id: artifactId, context });
+    setEditInstruction("");
+  }
+
+  async function applyRegenerate() {
+    const edit = editArtifact();
+    const chapterId = selectedId();
+    const instruction = editInstruction().trim();
+    if (!edit || !chapterId || !instruction || editSending()) return;
+    setEditSending(true);
+    setBusy("Redrawing…");
+    try {
+      const result = await invoke<ChapterContent>("regenerate_artifact", {
+        chapterId,
+        artifactId: edit.id,
+        instruction,
+        context: edit.context,
+      });
+      setContentCache((c) => ({
+        ...c,
+        [chapterId]: renderMarkdown(result.content, result.notes, result.artifacts),
+      }));
+      setChapterNotes((m) => ({ ...m, [chapterId]: result.notes }));
+      setEditArtifact(null);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setEditSending(false);
+      setBusy(null);
+    }
   }
 
   async function selectChapter(ch: Chapter) {
@@ -837,19 +893,32 @@ export default function BookView(props: Props) {
               <Show
                 when={confirmingArtifactDelete()}
                 fallback={
-                  <button
-                    type="button"
-                    class="artifact-ctrl artifact-ctrl--danger"
-                    aria-label="Delete image"
-                    onClick={() => setConfirmingArtifactDelete(true)}
-                  >
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                      <path d="M3 6h18" />
-                      <path d="M8 6V4h8v2" />
-                      <path d="M6 6l1 14h10l1-14" />
-                      <path d="M10 11v6M14 11v6" />
-                    </svg>
-                  </button>
+                  <>
+                    <button
+                      type="button"
+                      class="artifact-ctrl"
+                      aria-label="Edit image"
+                      onClick={() => openEditArtifact(a().id)}
+                    >
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M4 20h4L18.5 9.5l-4-4L4 16z" />
+                        <path d="M13.5 6.5l4 4" />
+                      </svg>
+                    </button>
+                    <button
+                      type="button"
+                      class="artifact-ctrl artifact-ctrl--danger"
+                      aria-label="Delete image"
+                      onClick={() => setConfirmingArtifactDelete(true)}
+                    >
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M3 6h18" />
+                        <path d="M8 6V4h8v2" />
+                        <path d="M6 6l1 14h10l1-14" />
+                        <path d="M10 11v6M14 11v6" />
+                      </svg>
+                    </button>
+                  </>
                 }
               >
                 <span class="artifact-confirm-label">Delete image?</span>
@@ -870,6 +939,61 @@ export default function BookView(props: Props) {
               </Show>
             </div>
           )}
+        </Show>
+
+        <Show when={editArtifact()}>
+          <div
+            class="rewrite-dialog-backdrop"
+            role="presentation"
+            onClick={() => {
+              if (!editSending()) setEditArtifact(null);
+            }}
+          >
+            <div
+              class="rewrite-dialog"
+              role="dialog"
+              aria-label="Edit image"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div class="rewrite-dialog-header">
+                <span class="rewrite-dialog-title">Edit image</span>
+                <button
+                  type="button"
+                  class="rewrite-dialog-close"
+                  aria-label="Close"
+                  disabled={editSending()}
+                  onClick={() => setEditArtifact(null)}
+                >
+                  ×
+                </button>
+              </div>
+              <form
+                class="rewrite-dialog-input"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  applyRegenerate();
+                }}
+              >
+                <textarea
+                  value={editInstruction()}
+                  onInput={(e) => setEditInstruction(e.currentTarget.value)}
+                  placeholder="Describe the change you want…"
+                  rows={3}
+                  disabled={editSending()}
+                />
+              </form>
+              <div class="rewrite-dialog-footer">
+                <button
+                  type="button"
+                  class="rewrite-dialog-understand"
+                  disabled={!editInstruction().trim() || editSending()}
+                  onClick={applyRegenerate}
+                >
+                  Regenerate
+                </button>
+              </div>
+            </div>
+          </div>
         </Show>
 
         <Show when={rewriteDialog()}>

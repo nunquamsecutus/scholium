@@ -423,6 +423,65 @@ async fn add_image(
 }
 
 #[tauri::command]
+async fn regenerate_artifact(
+    state: tauri::State<'_, AppState>,
+    chapter_id: String,
+    artifact_id: u32,
+    instruction: String,
+    context: String,
+) -> Result<ChapterContent, String> {
+    if instruction.trim().is_empty() {
+        return Err("empty instruction".to_string());
+    }
+
+    let book_path = state
+        .book_path
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("no book is open")?;
+    let book = manifest::load(&book_path)?;
+    let reading_level = book.metadata.reading_level.as_deref().unwrap_or("adult");
+    let topic = Some(book.metadata.topic.as_str()).filter(|s| !s.is_empty());
+
+    let chapter_path = chapter_path_for(&state, &chapter_id)?;
+    let raw_file = std::fs::read_to_string(&chapter_path)
+        .map_err(|e| format!("failed to read chapter: {e}"))?;
+    let page = edupage::read(&raw_file)?;
+    let artifact = page
+        .artifacts
+        .iter()
+        .find(|a| a.id == artifact_id)
+        .ok_or_else(|| format!("artifact {artifact_id} not found"))?;
+
+    let settings = state.settings.lock().unwrap().clone();
+    let messages = image::build_regenerate_messages(
+        &artifact.source,
+        &artifact.body,
+        &instruction,
+        &context,
+        reading_level,
+        topic,
+    );
+    let raw_llm = dispatch_llm(&settings, messages).await?;
+    let generated = image::parse_image_response(&raw_llm)?;
+    let new_aspect = image::aspect_ratio_of(&generated.svg);
+
+    let (new_raw, _) = edupage::regenerate_artifact(
+        &raw_file,
+        artifact_id,
+        &generated.svg,
+        &generated.caption,
+        new_aspect,
+    )?;
+    std::fs::write(&chapter_path, &new_raw)
+        .map_err(|e| format!("failed to write chapter: {e}"))?;
+
+    let page = edupage::read(&new_raw)?;
+    Ok(ChapterContent::from_page(page))
+}
+
+#[tauri::command]
 fn delete_artifact(
     state: tauri::State<'_, AppState>,
     chapter_id: String,
@@ -875,6 +934,7 @@ pub fn run() {
             rewrite_with_conversation,
             add_image,
             delete_artifact,
+            regenerate_artifact,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

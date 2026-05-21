@@ -728,6 +728,123 @@ pub fn delete_artifact(raw: &str, artifact_id: u32) -> Result<String, String> {
     Ok(new_file)
 }
 
+/// Replace an artifact's SVG and caption, updating its aspect ratio. If the
+/// aspect ratio crosses the block/float boundary (>= 1 vs < 1) the body
+/// marker is repositioned with an EDIT revision: block → inline appends the
+/// image to its paragraph; inline → block lifts it onto its own paragraph.
+/// Otherwise only the ARTIFACT block and metadata change.
+pub fn regenerate_artifact(
+    raw: &str,
+    artifact_id: u32,
+    new_svg: &str,
+    new_caption: &str,
+    new_aspect: f32,
+) -> Result<(String, ArtifactMeta), String> {
+    let (mut header, _) = parse_blocks(raw)?;
+    let idx = header
+        .artifacts
+        .iter()
+        .position(|a| a.id == artifact_id)
+        .ok_or_else(|| format!("artifact {} not found", artifact_id))?;
+    let old_wide = header.artifacts[idx].aspect_ratio >= 1.0;
+    let new_wide = new_aspect >= 1.0;
+    let now = chrono::Utc::now().to_rfc3339();
+
+    header.artifacts[idx].aspect_ratio = new_aspect;
+    header.artifacts[idx].caption = if new_caption.trim().is_empty() {
+        None
+    } else {
+        Some(new_caption.trim().to_string())
+    };
+    let updated = header.artifacts[idx].clone();
+    let file_id = header.id.clone();
+
+    // Reposition the body marker only when the placement class flips.
+    let mut extra_edit: Option<(String, String)> = None;
+    if old_wide != new_wide {
+        let content = reconstruct(raw)?;
+        let lines: Vec<&str> = content.lines().collect();
+        let url = format!("(epar://{})", artifact_id);
+        let alt = sanitize_alt(new_caption);
+        let image_md = format!("![{}](epar://{})", alt, artifact_id);
+
+        let mut found: Option<(usize, usize, Vec<String>)> = None;
+        for (i, line) in lines.iter().enumerate() {
+            let Some(url_pos) = line.find(&url) else { continue };
+            let bracket = line[..url_pos]
+                .rfind("![")
+                .ok_or("malformed image markdown")?;
+            let img_end = url_pos + url.len();
+            let mut img_start = bracket;
+            if img_start > 0 && line.as_bytes()[img_start - 1] == b' ' {
+                img_start -= 1;
+            }
+            let cleaned = format!("{}{}", &line[..img_start], &line[img_end..]);
+            if new_wide {
+                // inline → block: drop the inline image, lift onto its own paragraph.
+                let para = cleaned.trim_end().to_string();
+                found = Some((i, i + 1, vec![para, String::new(), image_md.clone()]));
+            } else if i >= 2 && lines[i - 1].trim().is_empty() {
+                // block → inline: append to the preceding paragraph.
+                found = Some((i - 2, i + 1, vec![format!("{} {}", lines[i - 2], image_md)]));
+            } else {
+                found = Some((i, i + 1, vec![image_md.clone()]));
+            }
+            break;
+        }
+        let (start_0, end_0, new_lines) = found
+            .ok_or_else(|| format!("image marker for artifact {} not found", artifact_id))?;
+        let block = new_lines.join("\n");
+        let sha1 = sha1_hex(&block);
+        header.revisions.push(RevisionMeta {
+            id: sha1.clone(),
+            ctime: now,
+            action_id: uuid::Uuid::new_v4().to_string(),
+            revision_type: RevisionType::Edit,
+            line_start: start_0 + 1,
+            line_end: Some(end_0),
+        });
+        extra_edit = Some((sha1, block));
+    }
+
+    let header_json = serde_json::to_string_pretty(&header).expect("header serialization");
+    let artifact_key = format!("ARTIFACT:{}", artifact_id);
+    let raw_lines: Vec<&str> = raw.lines().collect();
+    let delimiters: Vec<(usize, String, String)> = raw_lines
+        .iter()
+        .enumerate()
+        .filter_map(|(i, line)| parse_delimiter(line).map(|(uuid, key)| (i, uuid, key)))
+        .collect();
+
+    let mut new_file = header_json;
+    new_file.push('\n');
+    for (di, (line_idx, _, key)) in delimiters.iter().enumerate() {
+        let start = *line_idx;
+        let end = if di + 1 < delimiters.len() {
+            delimiters[di + 1].0
+        } else {
+            raw_lines.len()
+        };
+        if key == &artifact_key {
+            // Keep the delimiter line, swap the block body for the new SVG.
+            new_file.push_str(raw_lines[start]);
+            new_file.push('\n');
+            new_file.push_str(new_svg);
+            new_file.push('\n');
+        } else {
+            new_file.push_str(&raw_lines[start..end].join("\n"));
+            new_file.push('\n');
+        }
+    }
+    if let Some((sha1, block)) = extra_edit {
+        new_file.push_str(&delimiter(&file_id, &sha1));
+        new_file.push('\n');
+        new_file.push_str(&block);
+    }
+
+    Ok((new_file, updated))
+}
+
 /// Return the 0-indexed line containing the `target_n`-th word-bounded
 /// occurrence of `query`.
 fn line_of_occurrence(content: &str, query: &str, target_n: u32) -> Result<usize, String> {
@@ -1355,6 +1472,46 @@ mod tests {
     fn delete_artifact_errors_for_unknown_id() {
         let raw = create("ch-01", "Chapter", None, "Nothing here.");
         assert!(delete_artifact(&raw, 99).is_err());
+    }
+
+    #[test]
+    fn regenerate_artifact_swaps_svg_and_metadata_without_moving() {
+        let raw = create("ch-01", "Chapter", None, "The collapse is shown here.");
+        let (raw, _) = add_artifact(&raw, "collapse", 1, SVG, "cap", 2.0, "image").unwrap();
+        let new_svg = r#"<svg viewBox="0 0 100 40"><circle/></svg>"#;
+        let (raw, meta) = regenerate_artifact(&raw, 1, new_svg, "new cap", 2.5).unwrap();
+        assert_eq!(meta.aspect_ratio, 2.5);
+        let page = read(&raw).unwrap();
+        assert_eq!(page.artifacts[0].body, new_svg);
+        assert_eq!(page.artifacts[0].caption.as_deref(), Some("new cap"));
+        // Still wide → still a block paragraph, body marker unchanged.
+        assert_eq!(page.content, "The collapse is shown here.\n\n![cap](epar://1)");
+    }
+
+    #[test]
+    fn regenerate_artifact_moves_block_to_inline_when_now_tall() {
+        let raw = create("ch-01", "Chapter", None, "The collapse is shown here.");
+        let (raw, _) = add_artifact(&raw, "collapse", 1, SVG, "cap", 2.0, "image").unwrap();
+        let (raw, _) = regenerate_artifact(&raw, 1, SVG, "tall", 0.5).unwrap();
+        let page = read(&raw).unwrap();
+        assert_eq!(page.artifacts[0].aspect_ratio, 0.5);
+        assert_eq!(page.content, "The collapse is shown here. ![tall](epar://1)");
+    }
+
+    #[test]
+    fn regenerate_artifact_moves_inline_to_block_when_now_wide() {
+        let raw = create("ch-01", "Chapter", None, "The collapse is shown here.");
+        let (raw, _) = add_artifact(&raw, "collapse", 1, SVG, "cap", 0.5, "image").unwrap();
+        let (raw, _) = regenerate_artifact(&raw, 1, SVG, "wide", 2.0).unwrap();
+        let page = read(&raw).unwrap();
+        assert_eq!(page.artifacts[0].aspect_ratio, 2.0);
+        assert_eq!(page.content, "The collapse is shown here.\n\n![wide](epar://1)");
+    }
+
+    #[test]
+    fn regenerate_artifact_errors_for_unknown_id() {
+        let raw = create("ch-01", "Chapter", None, "Nothing here.");
+        assert!(regenerate_artifact(&raw, 99, SVG, "x", 1.0).is_err());
     }
 
     #[test]

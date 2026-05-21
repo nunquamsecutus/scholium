@@ -52,6 +52,54 @@ pub fn build_image_messages(
     ]
 }
 
+/// Build messages asking the model to revise an existing SVG per the user's
+/// instruction, returned as the same JSON `{ "svg", "caption" }` shape.
+pub fn build_regenerate_messages(
+    source: &str,
+    current_svg: &str,
+    instruction: &str,
+    context: &str,
+    reading_level: &str,
+    book_topic: Option<&str>,
+) -> Vec<LlmMessage> {
+    let topic_clause = match book_topic {
+        Some(t) if !t.is_empty() => format!("\nThe book's subject is: {t}.\n"),
+        _ => String::new(),
+    };
+    let context_clause = if context.trim().is_empty() {
+        String::new()
+    } else {
+        format!("\n\nSurrounding paragraph: {context}")
+    };
+
+    let system = format!(
+        "You revise SVG illustrations for educational content for a reader at \
+         {} reading level.{}\n\n\
+         You are given an existing illustration and a requested change. Return \
+         a revised version that applies the change while keeping the same \
+         general subject.\n\n\
+         Return ONLY a JSON object (no markdown, no code fence):\n\
+         {{\"svg\": \"<svg viewBox=\\\"...\\\">…</svg>\", \"caption\": \"short description\"}}\n\n\
+         Same SVG rules as before: a viewBox attribute; only basic shapes; \
+         transparent background; stroke=\"currentColor\" where lines should \
+         adapt to the page text color; no <image>, <foreignObject>, <script>, \
+         external references, or embedded fonts; compact (under ~6 kB). It is \
+         fine for the new image to have a different aspect ratio if the change \
+         calls for it.",
+        reading_level_description(reading_level),
+        topic_clause,
+    );
+
+    let user = format!(
+        "The illustration is about: {source}{context_clause}\n\nCurrent SVG:\n{current_svg}\n\nRequested change: {instruction}\n\nReturn the revised SVG."
+    );
+
+    vec![
+        LlmMessage { role: "system".to_string(), content: system },
+        LlmMessage { role: "user".to_string(), content: user },
+    ]
+}
+
 #[derive(Debug, Deserialize)]
 pub struct GeneratedImage {
     pub svg: String,
@@ -180,5 +228,30 @@ mod tests {
     #[test]
     fn aspect_ratio_defaults_to_square_without_viewbox() {
         assert_eq!(aspect_ratio_of("<svg></svg>"), 1.0);
+    }
+
+    #[test]
+    fn regenerate_prompt_includes_instruction_and_current_svg() {
+        let msgs = build_regenerate_messages(
+            "a black hole",
+            "<svg viewBox=\"0 0 10 10\"></svg>",
+            "make it more colorful",
+            "Black holes warp spacetime.",
+            "adult",
+            Some("Black holes"),
+        );
+        let user = msgs.iter().find(|m| m.role == "user").unwrap();
+        assert!(user.content.contains("make it more colorful"));
+        assert!(user.content.contains("viewBox"));
+        assert!(user.content.contains("a black hole"));
+        let system = msgs.iter().find(|m| m.role == "system").unwrap();
+        assert!(system.content.contains("Black holes"));
+    }
+
+    #[test]
+    fn regenerate_prompt_omits_context_clause_when_empty() {
+        let msgs = build_regenerate_messages("s", "<svg/>", "change", "", "adult", None);
+        let user = msgs.iter().find(|m| m.role == "user").unwrap();
+        assert!(!user.content.contains("Surrounding paragraph"));
     }
 }
