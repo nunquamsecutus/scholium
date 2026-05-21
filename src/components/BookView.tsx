@@ -223,6 +223,13 @@ export default function BookView(props: Props) {
   // Message shown in the floating busy pill while a highlight-driven LLM
   // action is in flight; null when idle.
   const [busy, setBusy] = createSignal<string | null>(null);
+  // The artifact whose controls overlay is currently shown (id + the figure's
+  // viewport rect for positioning), and whether the delete confirm is open.
+  const [activeArtifact, setActiveArtifact] = createSignal<{
+    id: number;
+    rect: { top: number; left: number; width: number; height: number };
+  } | null>(null);
+  const [confirmingArtifactDelete, setConfirmingArtifactDelete] = createSignal(false);
   const [generating, setGenerating] = createSignal(false);
   const [error, setError] = createSignal("");
   const [articleRef, setArticleRef] = createSignal<HTMLElement>();
@@ -292,11 +299,13 @@ export default function BookView(props: Props) {
     setCurrentPage((p) => Math.min(pageCount() - 1, p + 1));
   }
 
-  // Apply the current page by scrolling the column container.
+  // Apply the current page by scrolling the column container. Dismiss any
+  // open artifact controls since their anchored position would be stale.
   createEffect(() => {
     const article = articleRef();
     const page = currentPage();
     if (article) article.scrollLeft = page * article.clientWidth;
+    setActiveArtifact(null);
   });
 
   // Recompute pagination + note positions whenever chapter content or notes
@@ -377,6 +386,21 @@ export default function BookView(props: Props) {
     const onClick = (e: MouseEvent) => {
       const target = e.target as HTMLElement | null;
 
+      const figure = target?.closest(".artifact") as HTMLElement | null;
+      if (figure) {
+        e.preventDefault();
+        const id = Number(figure.dataset.artifactId);
+        const rect = figure.getBoundingClientRect();
+        setActiveArtifact({
+          id,
+          rect: { top: rect.top, left: rect.left, width: rect.width, height: rect.height },
+        });
+        setConfirmingArtifactDelete(false);
+        return;
+      }
+      // A click anywhere else in the article dismisses the artifact controls.
+      setActiveArtifact(null);
+
       const appRef = target?.closest(".appendix-ref") as HTMLElement | null;
       if (appRef) {
         e.preventDefault();
@@ -405,11 +429,20 @@ export default function BookView(props: Props) {
     onCleanup(() => article.removeEventListener("click", onClick));
   });
 
+  async function handleDeleteArtifact(artifactId: number) {
+    setActiveArtifact(null);
+    await runContentCommand("Removing image…", "delete_artifact", {
+      chapterId: selectedId(),
+      artifactId,
+    });
+  }
+
   async function selectChapter(ch: Chapter) {
     setError("");
     setSelectedId(ch.id);
     setCurrentPage(0);
     setEndnoteReturnPage(null);
+    setActiveArtifact(null);
 
     if (ch.status === "generated" && !contentCache()[ch.id]) {
       try {
@@ -789,6 +822,54 @@ export default function BookView(props: Props) {
             <BookLoader />
             {busy()}
           </div>
+        </Show>
+
+        <Show when={activeArtifact()}>
+          {(a) => (
+            <div
+              class="artifact-controls"
+              style={{
+                top: `${a().rect.top + 6}px`,
+                left: `${a().rect.left + a().rect.width - 6}px`,
+                transform: "translateX(-100%)",
+              }}
+            >
+              <Show
+                when={confirmingArtifactDelete()}
+                fallback={
+                  <button
+                    type="button"
+                    class="artifact-ctrl artifact-ctrl--danger"
+                    aria-label="Delete image"
+                    onClick={() => setConfirmingArtifactDelete(true)}
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                      <path d="M3 6h18" />
+                      <path d="M8 6V4h8v2" />
+                      <path d="M6 6l1 14h10l1-14" />
+                      <path d="M10 11v6M14 11v6" />
+                    </svg>
+                  </button>
+                }
+              >
+                <span class="artifact-confirm-label">Delete image?</span>
+                <button
+                  type="button"
+                  class="artifact-ctrl artifact-ctrl--danger"
+                  onClick={() => handleDeleteArtifact(a().id)}
+                >
+                  Delete
+                </button>
+                <button
+                  type="button"
+                  class="artifact-ctrl"
+                  onClick={() => setConfirmingArtifactDelete(false)}
+                >
+                  Cancel
+                </button>
+              </Show>
+            </div>
+          )}
         </Show>
 
         <Show when={rewriteDialog()}>

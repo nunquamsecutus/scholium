@@ -423,6 +423,22 @@ async fn add_image(
 }
 
 #[tauri::command]
+fn delete_artifact(
+    state: tauri::State<'_, AppState>,
+    chapter_id: String,
+    artifact_id: u32,
+) -> Result<ChapterContent, String> {
+    let chapter_path = chapter_path_for(&state, &chapter_id)?;
+    let raw = std::fs::read_to_string(&chapter_path)
+        .map_err(|e| format!("failed to read chapter: {e}"))?;
+    let new_raw = edupage::delete_artifact(&raw, artifact_id)?;
+    std::fs::write(&chapter_path, &new_raw)
+        .map_err(|e| format!("failed to write chapter: {e}"))?;
+    let page = edupage::read(&new_raw)?;
+    Ok(ChapterContent::from_page(page))
+}
+
+#[tauri::command]
 async fn rewrite_passage(
     state: tauri::State<'_, AppState>,
     chapter_id: String,
@@ -858,6 +874,7 @@ pub fn run() {
             converse_about_rewrite,
             rewrite_with_conversation,
             add_image,
+            delete_artifact,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

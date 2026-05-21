@@ -638,6 +638,96 @@ pub fn rewrite_existing_span(
     Ok((new_file, new_id))
 }
 
+/// Remove an artifact: drop its metadata, strip the ARTIFACT block, and
+/// remove the `![alt](epar://<id>)` image from the body via an EDIT revision.
+/// Block images (on their own paragraph) collapse back to the preceding
+/// paragraph; inline images are spliced out of their line (consuming the
+/// leading space they were inserted with).
+pub fn delete_artifact(raw: &str, artifact_id: u32) -> Result<String, String> {
+    let (mut header, _) = parse_blocks(raw)?;
+    let art_idx = header
+        .artifacts
+        .iter()
+        .position(|a| a.id == artifact_id)
+        .ok_or_else(|| format!("artifact {} not found", artifact_id))?;
+    let now = chrono::Utc::now().to_rfc3339();
+    let content = reconstruct(raw)?;
+    let lines: Vec<&str> = content.lines().collect();
+    let url = format!("(epar://{})", artifact_id);
+
+    // (start_0, end_0_exclusive, new_lines) for the EDIT revision.
+    let mut edit: Option<(usize, usize, Vec<String>)> = None;
+    for (i, line) in lines.iter().enumerate() {
+        let Some(url_pos) = line.find(&url) else { continue };
+        let bracket = line[..url_pos]
+            .rfind("![")
+            .ok_or("malformed image markdown")?;
+        let img_end = url_pos + url.len();
+        let mut img_start = bracket;
+        if img_start > 0 && line.as_bytes()[img_start - 1] == b' ' {
+            img_start -= 1;
+        }
+        let cleaned = format!("{}{}", &line[..img_start], &line[img_end..]);
+        if cleaned.trim().is_empty() {
+            // Block image: collapse [paragraph, blank, image] back to [paragraph].
+            if i >= 2 && lines[i - 1].trim().is_empty() {
+                edit = Some((i - 2, i + 1, vec![lines[i - 2].to_string()]));
+            } else {
+                edit = Some((i, i + 1, vec![]));
+            }
+        } else {
+            edit = Some((i, i + 1, vec![cleaned]));
+        }
+        break;
+    }
+    let (start_0, end_0, new_lines) = edit
+        .ok_or_else(|| format!("image marker for artifact {} not found in body", artifact_id))?;
+
+    let new_block = new_lines.join("\n");
+    let new_sha1 = sha1_hex(&new_block);
+    let file_id = header.id.clone();
+
+    header.revisions.push(RevisionMeta {
+        id: new_sha1.clone(),
+        ctime: now,
+        action_id: uuid::Uuid::new_v4().to_string(),
+        revision_type: RevisionType::Edit,
+        line_start: start_0 + 1,
+        line_end: Some(end_0),
+    });
+    header.artifacts.remove(art_idx);
+
+    let header_json = serde_json::to_string_pretty(&header).expect("header serialization");
+    let deleted_key = format!("ARTIFACT:{}", artifact_id);
+    let raw_lines: Vec<&str> = raw.lines().collect();
+    let delimiters: Vec<(usize, String, String)> = raw_lines
+        .iter()
+        .enumerate()
+        .filter_map(|(i, line)| parse_delimiter(line).map(|(uuid, key)| (i, uuid, key)))
+        .collect();
+
+    let mut new_file = header_json;
+    new_file.push('\n');
+    for (idx, (line_idx, _, key)) in delimiters.iter().enumerate() {
+        if key == &deleted_key {
+            continue;
+        }
+        let start = *line_idx;
+        let end = if idx + 1 < delimiters.len() {
+            delimiters[idx + 1].0
+        } else {
+            raw_lines.len()
+        };
+        new_file.push_str(&raw_lines[start..end].join("\n"));
+        new_file.push('\n');
+    }
+    new_file.push_str(&delimiter(&file_id, &new_sha1));
+    new_file.push('\n');
+    new_file.push_str(&new_block);
+
+    Ok(new_file)
+}
+
 /// Return the 0-indexed line containing the `target_n`-th word-bounded
 /// occurrence of `query`.
 fn line_of_occurrence(content: &str, query: &str, target_n: u32) -> Result<usize, String> {
@@ -1221,6 +1311,50 @@ mod tests {
     fn add_artifact_errors_when_selection_missing() {
         let raw = create("ch-01", "Chapter", None, "Nothing relevant here.");
         assert!(add_artifact(&raw, "absent phrase", 1, SVG, "x", 2.0, "image").is_err());
+    }
+
+    #[test]
+    fn delete_artifact_removes_block_image_cleanly() {
+        let raw = create("ch-01", "Chapter", None, "The collapse is shown here.");
+        let (raw, _) = add_artifact(&raw, "collapse", 1, SVG, "cap", 2.0, "image").unwrap();
+        let raw = delete_artifact(&raw, 1).unwrap();
+        assert_eq!(reconstruct(&raw).unwrap(), "The collapse is shown here.");
+        assert!(read(&raw).unwrap().artifacts.is_empty());
+        assert!(!raw.contains("ARTIFACT:1"));
+        assert!(!raw.contains(SVG));
+    }
+
+    #[test]
+    fn delete_artifact_removes_inline_image_cleanly() {
+        let raw = create("ch-01", "Chapter", None, "The collapse is shown here.");
+        let (raw, _) = add_artifact(&raw, "collapse", 1, SVG, "cap", 0.5, "image").unwrap();
+        // Sanity: it was inserted inline.
+        assert_eq!(
+            reconstruct(&raw).unwrap(),
+            "The collapse ![cap](epar://1) is shown here."
+        );
+        let raw = delete_artifact(&raw, 1).unwrap();
+        assert_eq!(reconstruct(&raw).unwrap(), "The collapse is shown here.");
+        assert!(read(&raw).unwrap().artifacts.is_empty());
+    }
+
+    #[test]
+    fn delete_artifact_preserves_other_artifacts() {
+        let raw = create("ch-01", "Chapter", None, "First spot and second spot here.");
+        let (raw, _) = add_artifact(&raw, "First spot", 1, SVG, "one", 0.5, "image").unwrap();
+        let (raw, _) = add_artifact(&raw, "second spot", 1, SVG, "two", 0.5, "image").unwrap();
+        let raw = delete_artifact(&raw, 1).unwrap();
+        let page = read(&raw).unwrap();
+        assert_eq!(page.artifacts.len(), 1);
+        assert_eq!(page.artifacts[0].id, 2);
+        assert!(page.content.contains("![two](epar://2)"));
+        assert!(!page.content.contains("epar://1"));
+    }
+
+    #[test]
+    fn delete_artifact_errors_for_unknown_id() {
+        let raw = create("ch-01", "Chapter", None, "Nothing here.");
+        assert!(delete_artifact(&raw, 99).is_err());
     }
 
     #[test]
