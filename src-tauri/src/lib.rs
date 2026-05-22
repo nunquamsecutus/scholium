@@ -29,9 +29,9 @@ async fn dispatch_llm(
     match settings.provider {
         LlmProvider::Claude => {
             let key = settings.claude_api_key.as_ref().ok_or(
-                "Claude API key not configured — restart with --api-key or set ANTHROPIC_API_KEY",
+                "Claude API key not configured — set it in Settings (⌘,)",
             )?;
-            llm::call_claude(key, messages).await
+            llm::call_claude(key, llm::CLAUDE_DEFAULT_MODEL, messages).await
         }
         LlmProvider::Ollama => {
             llm::call_ollama(&settings.ollama_url, &settings.ollama_model, messages).await
@@ -39,8 +39,29 @@ async fn dispatch_llm(
     }
 }
 
-// Vision dispatch. Generic over providers, but only Claude is implemented;
-// Ollama returns an error so callers fall back to the text-only result.
+// SVG authoring dispatch. Uses the stronger generation model on Claude;
+// Ollama uses its configured model as usual.
+async fn dispatch_image_generation(
+    settings: &Settings,
+    messages: Vec<llm::LlmMessage>,
+) -> Result<String, String> {
+    match settings.provider {
+        LlmProvider::Claude => {
+            let key = settings
+                .claude_api_key
+                .as_ref()
+                .ok_or("Claude API key not configured — set it in Settings (⌘,)")?;
+            llm::call_claude(key, llm::CLAUDE_GENERATION_MODEL, messages).await
+        }
+        LlmProvider::Ollama => {
+            llm::call_ollama(&settings.ollama_url, &settings.ollama_model, messages).await
+        }
+    }
+}
+
+// Vision dispatch for critiquing a rendered illustration. Uses the lighter
+// critique model on Claude. Only Claude is implemented; Ollama returns an
+// error so the refinement loop falls back to the un-judged result.
 async fn dispatch_llm_vision(
     settings: &Settings,
     messages: Vec<llm::LlmMessage>,
@@ -52,7 +73,7 @@ async fn dispatch_llm_vision(
                 .claude_api_key
                 .as_ref()
                 .ok_or("Claude API key not configured")?;
-            llm::call_claude_vision(key, messages, image).await
+            llm::call_claude_vision(key, llm::CLAUDE_CRITIQUE_MODEL, messages, image).await
         }
         LlmProvider::Ollama => {
             Err("vision refinement is not supported for the Ollama provider".to_string())
@@ -85,6 +106,7 @@ async fn refine_image(
     let quality = image::quality_description(&settings.image_quality);
 
     for _ in 0..MAX_REFINEMENT_ITERATIONS {
+        // Critique pass (vision, lighter model): render and judge.
         let png = match image::rasterize_svg_to_png(&candidate.svg) {
             Ok(p) => p,
             Err(e) => {
@@ -96,7 +118,7 @@ async fn refine_image(
             media_type: "image/png".to_string(),
             base64_data: base64::engine::general_purpose::STANDARD.encode(&png),
         };
-        let messages = image::build_evaluate_messages(
+        let judge_messages = image::build_judge_messages(
             source,
             context,
             quality,
@@ -104,35 +126,44 @@ async fn refine_image(
             reading_level,
             topic,
         );
-        let resp = match dispatch_llm_vision(settings, messages, &llm_image).await {
-            Ok(r) => r,
+        let judgment = match dispatch_llm_vision(settings, judge_messages, &llm_image).await {
+            Ok(resp) => match image::parse_image_judgment(&resp) {
+                Ok(j) => j,
+                Err(e) => {
+                    eprintln!("image refine: judgment parse failed, keeping current: {e}");
+                    break;
+                }
+            },
             Err(e) => {
-                eprintln!("image refine: vision call skipped, keeping current: {e}");
-                break;
-            }
-        };
-        let eval = match image::parse_image_evaluation(&resp) {
-            Ok(e) => e,
-            Err(e) => {
-                eprintln!("image refine: parse failed, keeping current: {e}");
+                eprintln!("image refine: critique skipped, keeping current: {e}");
                 break;
             }
         };
 
-        if eval.meets {
+        if judgment.meets {
             break; // Already at the target quality.
         }
-        match eval.svg {
-            Some(svg) if svg.trim_start().starts_with("<svg") => {
-                let caption = if eval.caption.trim().is_empty() {
-                    candidate.caption
-                } else {
-                    eval.caption
-                };
-                candidate = image::GeneratedImage { svg, caption };
-            }
-            _ => {
-                eprintln!("image refine: model wanted changes but gave no svg; keeping current");
+
+        // Improvement pass (text, stronger model): redraw from the critique.
+        let improve_messages = image::build_improve_messages(
+            source,
+            context,
+            quality,
+            &candidate.svg,
+            &judgment.critique,
+            reading_level,
+            topic,
+        );
+        match dispatch_image_generation(settings, improve_messages).await {
+            Ok(resp) => match image::parse_image_response(&resp) {
+                Ok(improved) => candidate = improved,
+                Err(e) => {
+                    eprintln!("image refine: improvement parse failed, keeping current: {e}");
+                    break;
+                }
+            },
+            Err(e) => {
+                eprintln!("image refine: improvement generation failed, keeping current: {e}");
                 break;
             }
         }
@@ -558,7 +589,7 @@ async fn add_image(
 
     let settings = state.settings.lock().unwrap().clone();
     let messages = image::build_image_messages(&selection, &context, reading_level, topic);
-    let raw_llm = dispatch_llm(&settings, messages).await?;
+    let raw_llm = dispatch_image_generation(&settings, messages).await?;
     let generated = image::parse_image_response(&raw_llm)?;
     let generated = refine_image(&settings, generated, &selection, &context, reading_level, topic).await;
     let aspect = image::aspect_ratio_of(&generated.svg);
@@ -624,7 +655,7 @@ async fn regenerate_artifact(
         reading_level,
         topic,
     );
-    let raw_llm = dispatch_llm(&settings, messages).await?;
+    let raw_llm = dispatch_image_generation(&settings, messages).await?;
     let generated = image::parse_image_response(&raw_llm)?;
     let generated = refine_image(&settings, generated, &source, &context, reading_level, topic).await;
     let new_aspect = image::aspect_ratio_of(&generated.svg);

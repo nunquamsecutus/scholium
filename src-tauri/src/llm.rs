@@ -12,7 +12,13 @@ pub struct LlmImage {
     pub base64_data: String,
 }
 
-const CLAUDE_MODEL: &str = "claude-sonnet-4-6";
+/// Default text model for general work (onboarding, chapters, notes, …).
+pub const CLAUDE_DEFAULT_MODEL: &str = "claude-sonnet-4-6";
+/// Stronger model for the harder task of authoring SVG illustrations.
+pub const CLAUDE_GENERATION_MODEL: &str = "claude-opus-4-7";
+/// Vision model used to critique a rendered illustration — judging is easier
+/// than generating, so a lighter model suffices.
+pub const CLAUDE_CRITIQUE_MODEL: &str = "claude-sonnet-4-6";
 
 // POST a prepared request body to the Claude messages API and return the
 // first text block. Shared by the text and vision calls.
@@ -50,12 +56,16 @@ fn split_system(messages: &[LlmMessage]) -> (Option<String>, Vec<&LlmMessage>) {
     (system, chat)
 }
 
-pub async fn call_claude(api_key: &str, messages: Vec<LlmMessage>) -> Result<String, String> {
+pub async fn call_claude(
+    api_key: &str,
+    model: &str,
+    messages: Vec<LlmMessage>,
+) -> Result<String, String> {
     // Claude uses a top-level `system` field rather than a system role in messages.
     let (system, chat_messages) = split_system(&messages);
 
     let mut body = serde_json::json!({
-        "model": CLAUDE_MODEL,
+        "model": model,
         "max_tokens": 8192,
         "messages": chat_messages,
     });
@@ -70,6 +80,7 @@ pub async fn call_claude(api_key: &str, messages: Vec<LlmMessage>) -> Result<Str
 /// image content block — used for the SVG render-and-critique refinement.
 pub async fn call_claude_vision(
     api_key: &str,
+    model: &str,
     messages: Vec<LlmMessage>,
     image: &LlmImage,
 ) -> Result<String, String> {
@@ -102,7 +113,7 @@ pub async fn call_claude_vision(
         .collect();
 
     let mut body = serde_json::json!({
-        "model": CLAUDE_MODEL,
+        "model": model,
         "max_tokens": 8192,
         "messages": api_messages,
     });

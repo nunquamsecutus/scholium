@@ -126,11 +126,10 @@ pub fn build_regenerate_messages(
     ]
 }
 
-/// Build messages for one evaluate-and-maybe-improve pass. The rendered PNG is
-/// attached separately by the vision call. The model judges the rendering
-/// against `quality` and either declares it good enough or returns an improved
-/// SVG.
-pub fn build_evaluate_messages(
+/// Build messages for the critique pass (vision). The rendered PNG is attached
+/// by the vision call. The model only judges the rendering against `quality`
+/// and describes what to fix — it does not produce SVG.
+pub fn build_judge_messages(
     source: &str,
     context: &str,
     quality: &str,
@@ -149,21 +148,18 @@ pub fn build_evaluate_messages(
     };
 
     let system = format!(
-        "You evaluate and improve SVG illustrations for educational content for a \
+        "You are an exacting art critic for educational illustrations aimed at a \
          reader at {} reading level.{}\n\n\
          You are shown the current rendering of an illustration, the intent it \
          should convey, and a target quality bar. Judge honestly whether the \
-         rendering already meets the target quality.\n\n\
+         rendering already meets the target.\n\n\
          Return ONLY a JSON object (no markdown, no code fence):\n\
-         {{\"meets\": true|false, \"plan\": \"...\", \"svg\": \"<svg viewBox=\\\"...\\\">…</svg>\", \"caption\": \"...\"}}\n\n\
-         - If it already meets the target, return {{\"meets\": true}} and nothing else.\n\
-         - If it does NOT meet the target, return \"meets\": false, put your \
-           critique and the specific fixes in \"plan\", and provide an improved \
-           \"svg\" and \"caption\".\n\n\
-         SVG rules: a viewBox; only basic shapes; transparent background; \
-         stroke=\"currentColor\" where lines should adapt to the page text color; \
-         no <image>, <foreignObject>, <script>, external references, or embedded \
-         fonts; compact.",
+         {{\"meets\": true|false, \"critique\": \"...\"}}\n\n\
+         - If it meets the target, return {{\"meets\": true}} with an empty critique.\n\
+         - If it does NOT, return \"meets\": false and a concrete critique: what is \
+           wrong (proportions, clarity, missing or unrecognizable elements, \
+           clutter, mismatch with the intent) and specifically what to change. Do \
+           not output SVG.",
         reading_level_description(reading_level),
         topic_clause,
     );
@@ -172,7 +168,59 @@ pub fn build_evaluate_messages(
         "Intent: an illustration of {source}.{context_clause}\nCurrent caption: {caption}\n\n\
          Target quality: {quality}.\n\n\
          The attached image is the current rendering. Judge whether it meets the \
-         target quality, and improve it if it does not."
+         target quality."
+    );
+
+    vec![
+        LlmMessage { role: "system".to_string(), content: system },
+        LlmMessage { role: "user".to_string(), content: user },
+    ]
+}
+
+/// Build messages for the improvement pass (text). Given the current SVG and a
+/// critique of how it rendered, author a better SVG that addresses the critique
+/// and reaches the target quality.
+pub fn build_improve_messages(
+    source: &str,
+    context: &str,
+    quality: &str,
+    current_svg: &str,
+    critique: &str,
+    reading_level: &str,
+    book_topic: Option<&str>,
+) -> Vec<LlmMessage> {
+    let topic_clause = match book_topic {
+        Some(t) if !t.is_empty() => format!("\nThe book's subject is: {t}.\n"),
+        _ => String::new(),
+    };
+    let context_clause = if context.trim().is_empty() {
+        String::new()
+    } else {
+        format!("\nSurrounding paragraph: {context}")
+    };
+
+    let system = format!(
+        "You author SVG illustrations for educational content for a reader at {} \
+         reading level.{}\n\n\
+         You are given the current SVG and a critique of how it rendered. Produce \
+         an improved SVG that addresses every point in the critique and reaches \
+         the target quality.\n\n\
+         Return ONLY a JSON object (no markdown, no code fence):\n\
+         {{\"plan\": \"...\", \"svg\": \"<svg viewBox=\\\"...\\\">…</svg>\", \"caption\": \"...\"}}\n\n\
+         Fill \"plan\" FIRST: state how you'll address the critique and lay out the \
+         composition (elements, arrangement, approximate viewBox coordinates), \
+         then draw the SVG to match. Same SVG rules: a viewBox; only basic shapes; \
+         transparent background; stroke=\"currentColor\" where lines should adapt \
+         to the page text color; no <image>, <foreignObject>, <script>, external \
+         references, or embedded fonts; compact.",
+        reading_level_description(reading_level),
+        topic_clause,
+    );
+
+    let user = format!(
+        "Intent: an illustration of {source}.{context_clause}\n\nTarget quality: {quality}.\n\n\
+         Current SVG:\n{current_svg}\n\nCritique of the current rendering:\n{critique}\n\n\
+         Produce the improved SVG."
     );
 
     vec![
@@ -227,21 +275,18 @@ pub fn parse_image_response(response: &str) -> Result<GeneratedImage, String> {
     Ok(img)
 }
 
-/// The result of an evaluate-and-maybe-improve pass. When `meets` is true the
-/// rendering passed the quality bar and `svg` is typically absent; otherwise
-/// `svg`/`caption` carry the improved illustration.
+/// The critic's verdict: whether the rendering meets the target, plus a
+/// concrete critique to feed the improvement pass when it doesn't.
 #[derive(Debug, Deserialize)]
-pub struct ImageEvaluation {
+pub struct ImageJudgment {
     pub meets: bool,
     #[serde(default)]
-    pub svg: Option<String>,
-    #[serde(default)]
-    pub caption: String,
+    pub critique: String,
 }
 
-pub fn parse_image_evaluation(response: &str) -> Result<ImageEvaluation, String> {
+pub fn parse_image_judgment(response: &str) -> Result<ImageJudgment, String> {
     let json = extract_json(response);
-    serde_json::from_str(&json).map_err(|e| format!("failed to parse image evaluation: {e}"))
+    serde_json::from_str(&json).map_err(|e| format!("failed to parse image judgment: {e}"))
 }
 
 fn extract_json(s: &str) -> String {
@@ -397,8 +442,8 @@ mod tests {
     }
 
     #[test]
-    fn evaluate_prompt_includes_quality_target_and_meets_field() {
-        let msgs = build_evaluate_messages(
+    fn judge_prompt_includes_quality_target_and_meets_field() {
+        let msgs = build_judge_messages(
             "a black hole",
             "",
             "a polished, detailed illustration",
@@ -408,9 +453,29 @@ mod tests {
         );
         let system = msgs.iter().find(|m| m.role == "system").unwrap();
         assert!(system.content.contains("\"meets\""));
+        assert!(system.content.contains("Do not output SVG"));
         let user = msgs.iter().find(|m| m.role == "user").unwrap();
         assert!(user.content.contains("Target quality: a polished, detailed illustration"));
         assert!(user.content.contains("attached image"));
+    }
+
+    #[test]
+    fn improve_prompt_includes_current_svg_and_critique() {
+        let msgs = build_improve_messages(
+            "a black hole",
+            "",
+            "a polished illustration",
+            "<svg viewBox=\"0 0 10 10\"></svg>",
+            "the circle is off-center and too small",
+            "adult",
+            None,
+        );
+        let user = msgs.iter().find(|m| m.role == "user").unwrap();
+        assert!(user.content.contains("Current SVG:"));
+        assert!(user.content.contains("viewBox"));
+        assert!(user.content.contains("off-center"));
+        let system = msgs.iter().find(|m| m.role == "system").unwrap();
+        assert!(system.content.contains("\"plan\""));
     }
 
     #[test]
@@ -424,19 +489,16 @@ mod tests {
     }
 
     #[test]
-    fn parse_evaluation_meets_true() {
-        let eval = parse_image_evaluation(r#"{"meets": true}"#).unwrap();
-        assert!(eval.meets);
-        assert!(eval.svg.is_none());
+    fn parse_judgment_meets_true() {
+        let j = parse_image_judgment(r#"{"meets": true, "critique": ""}"#).unwrap();
+        assert!(j.meets);
     }
 
     #[test]
-    fn parse_evaluation_with_improvement() {
-        let r = r#"{"meets": false, "plan": "fix it", "svg": "<svg viewBox=\"0 0 1 1\"></svg>", "caption": "c"}"#;
-        let eval = parse_image_evaluation(r).unwrap();
-        assert!(!eval.meets);
-        assert_eq!(eval.svg.as_deref(), Some("<svg viewBox=\"0 0 1 1\"></svg>"));
-        assert_eq!(eval.caption, "c");
+    fn parse_judgment_with_critique() {
+        let j = parse_image_judgment(r#"{"meets": false, "critique": "fix the proportions"}"#).unwrap();
+        assert!(!j.meets);
+        assert_eq!(j.critique, "fix the proportions");
     }
 
     #[test]
