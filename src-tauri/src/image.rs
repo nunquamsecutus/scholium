@@ -107,6 +107,82 @@ pub fn build_regenerate_messages(
     ]
 }
 
+/// Build messages for the render-and-critique refinement pass. The rendered
+/// PNG is attached separately by the vision call; this asks the model to
+/// critique what it sees against the intent and return an improved SVG.
+pub fn build_critique_messages(
+    source: &str,
+    context: &str,
+    caption: &str,
+    reading_level: &str,
+    book_topic: Option<&str>,
+) -> Vec<LlmMessage> {
+    let topic_clause = match book_topic {
+        Some(t) if !t.is_empty() => format!("\nThe book's subject is: {t}.\n"),
+        _ => String::new(),
+    };
+    let context_clause = if context.trim().is_empty() {
+        String::new()
+    } else {
+        format!("\nSurrounding paragraph: {context}")
+    };
+
+    let system = format!(
+        "You improve SVG illustrations for educational content for a reader at \
+         {} reading level.{}\n\n\
+         You are shown the current rendering of an illustration along with the \
+         intent it should convey. Critique it honestly — proportions, clarity, \
+         whether each element is recognizable, clutter, and whether it actually \
+         matches the intent — then produce an improved SVG.\n\n\
+         Return ONLY a JSON object (no markdown, no code fence):\n\
+         {{\"plan\": \"...\", \"svg\": \"<svg viewBox=\\\"...\\\">…</svg>\", \"caption\": \"...\"}}\n\n\
+         Put your critique and the specific fixes you'll make in \"plan\", then \
+         draw the improved SVG. Same SVG rules: a viewBox; only basic shapes; \
+         transparent background; stroke=\"currentColor\" where lines should adapt \
+         to the page text color; no <image>, <foreignObject>, <script>, external \
+         references, or embedded fonts; compact.",
+        reading_level_description(reading_level),
+        topic_clause,
+    );
+
+    let user = format!(
+        "Intent: an illustration of {source}.{context_clause}\nCurrent caption: {caption}\n\n\
+         The attached image is the current rendering. Critique it, then return the improved SVG."
+    );
+
+    vec![
+        LlmMessage { role: "system".to_string(), content: system },
+        LlmMessage { role: "user".to_string(), content: user },
+    ]
+}
+
+/// Render an SVG to PNG bytes, scaled so the long edge is ~512px. Loads system
+/// fonts so any <text> renders. Used to feed the vision critique loop.
+pub fn rasterize_svg_to_png(svg: &str) -> Result<Vec<u8>, String> {
+    use resvg::{tiny_skia, usvg};
+
+    let mut opt = usvg::Options::default();
+    opt.fontdb_mut().load_system_fonts();
+    let tree = usvg::Tree::from_str(svg, &opt).map_err(|e| format!("svg parse failed: {e}"))?;
+
+    let size = tree.size();
+    let max_edge = size.width().max(size.height());
+    if max_edge <= 0.0 {
+        return Err("svg has no usable size".to_string());
+    }
+    let scale = 512.0 / max_edge;
+    let w = ((size.width() * scale).ceil() as u32).max(1);
+    let h = ((size.height() * scale).ceil() as u32).max(1);
+
+    let mut pixmap = tiny_skia::Pixmap::new(w, h).ok_or("failed to allocate pixmap")?;
+    resvg::render(
+        &tree,
+        tiny_skia::Transform::from_scale(scale, scale),
+        &mut pixmap.as_mut(),
+    );
+    pixmap.encode_png().map_err(|e| format!("png encode failed: {e}"))
+}
+
 #[derive(Debug, Deserialize)]
 pub struct GeneratedImage {
     pub svg: String,
@@ -276,5 +352,30 @@ mod tests {
         let msgs = build_regenerate_messages("s", "<svg/>", "change", "", "adult", None);
         let user = msgs.iter().find(|m| m.role == "user").unwrap();
         assert!(!user.content.contains("Surrounding paragraph"));
+    }
+
+    #[test]
+    fn critique_prompt_asks_to_critique_then_improve() {
+        let msgs = build_critique_messages("a black hole", "", "a black hole", "adult", None);
+        let system = msgs.iter().find(|m| m.role == "system").unwrap();
+        assert!(system.content.to_lowercase().contains("critique"));
+        assert!(system.content.contains("\"plan\""));
+        let user = msgs.iter().find(|m| m.role == "user").unwrap();
+        assert!(user.content.contains("a black hole"));
+        assert!(user.content.contains("attached image"));
+    }
+
+    #[test]
+    fn rasterize_produces_png_bytes() {
+        let svg = r#"<svg viewBox="0 0 100 50" xmlns="http://www.w3.org/2000/svg"><rect width="100" height="50" fill="blue"/></svg>"#;
+        let png = rasterize_svg_to_png(svg).unwrap();
+        assert!(png.len() > 8);
+        // PNG magic number.
+        assert_eq!(&png[0..8], &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
+    }
+
+    #[test]
+    fn rasterize_rejects_garbage() {
+        assert!(rasterize_svg_to_png("not an svg at all").is_err());
     }
 }

@@ -6,26 +6,18 @@ pub struct LlmMessage {
     pub content: String,
 }
 
-pub async fn call_claude(api_key: &str, messages: Vec<LlmMessage>) -> Result<String, String> {
+/// An image attached to a vision request (base64-encoded bytes + media type).
+pub struct LlmImage {
+    pub media_type: String,
+    pub base64_data: String,
+}
+
+const CLAUDE_MODEL: &str = "claude-sonnet-4-6";
+
+// POST a prepared request body to the Claude messages API and return the
+// first text block. Shared by the text and vision calls.
+async fn post_claude(api_key: &str, body: serde_json::Value) -> Result<String, String> {
     let client = reqwest::Client::new();
-
-    // Claude uses a top-level `system` field rather than a system role in messages.
-    let system = messages.iter()
-        .find(|m| m.role == "system")
-        .map(|m| m.content.clone());
-    let chat_messages: Vec<&LlmMessage> = messages.iter()
-        .filter(|m| m.role != "system")
-        .collect();
-
-    let mut body = serde_json::json!({
-        "model": "claude-sonnet-4-6",
-        "max_tokens": 8192,
-        "messages": chat_messages,
-    });
-    if let Some(sys) = system {
-        body["system"] = serde_json::Value::String(sys);
-    }
-
     let res = client
         .post("https://api.anthropic.com/v1/messages")
         .header("x-api-key", api_key)
@@ -47,6 +39,78 @@ pub async fn call_claude(api_key: &str, messages: Vec<LlmMessage>) -> Result<Str
         .as_str()
         .map(|s| s.to_string())
         .ok_or_else(|| "unexpected response shape from Claude".to_string())
+}
+
+fn split_system(messages: &[LlmMessage]) -> (Option<String>, Vec<&LlmMessage>) {
+    let system = messages
+        .iter()
+        .find(|m| m.role == "system")
+        .map(|m| m.content.clone());
+    let chat = messages.iter().filter(|m| m.role != "system").collect();
+    (system, chat)
+}
+
+pub async fn call_claude(api_key: &str, messages: Vec<LlmMessage>) -> Result<String, String> {
+    // Claude uses a top-level `system` field rather than a system role in messages.
+    let (system, chat_messages) = split_system(&messages);
+
+    let mut body = serde_json::json!({
+        "model": CLAUDE_MODEL,
+        "max_tokens": 8192,
+        "messages": chat_messages,
+    });
+    if let Some(sys) = system {
+        body["system"] = serde_json::Value::String(sys);
+    }
+
+    post_claude(api_key, body).await
+}
+
+/// Like `call_claude`, but attaches `image` to the final user message as an
+/// image content block — used for the SVG render-and-critique refinement.
+pub async fn call_claude_vision(
+    api_key: &str,
+    messages: Vec<LlmMessage>,
+    image: &LlmImage,
+) -> Result<String, String> {
+    let (system, chat) = split_system(&messages);
+    if chat.is_empty() {
+        return Err("vision request needs a user message".to_string());
+    }
+
+    let last = chat.len() - 1;
+    let api_messages: Vec<serde_json::Value> = chat
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            if i == last {
+                serde_json::json!({
+                    "role": m.role,
+                    "content": [
+                        { "type": "text", "text": m.content },
+                        { "type": "image", "source": {
+                            "type": "base64",
+                            "media_type": image.media_type,
+                            "data": image.base64_data,
+                        }},
+                    ],
+                })
+            } else {
+                serde_json::json!({ "role": m.role, "content": m.content })
+            }
+        })
+        .collect();
+
+    let mut body = serde_json::json!({
+        "model": CLAUDE_MODEL,
+        "max_tokens": 8192,
+        "messages": api_messages,
+    });
+    if let Some(sys) = system {
+        body["system"] = serde_json::Value::String(sys);
+    }
+
+    post_claude(api_key, body).await
 }
 
 pub async fn call_ollama(url: &str, model: &str, messages: Vec<LlmMessage>) -> Result<String, String> {

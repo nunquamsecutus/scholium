@@ -28,4 +28,6 @@ serde_json = "1"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
 sha1 = "0.10"
+resvg = "0.44"
+base64 = "0.22"
 

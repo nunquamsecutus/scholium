@@ -37,6 +37,70 @@ async fn dispatch_llm(
     }
 }
 
+// Vision dispatch. Generic over providers, but only Claude is implemented;
+// Ollama returns an error so callers fall back to the text-only result.
+async fn dispatch_llm_vision(
+    settings: &Settings,
+    messages: Vec<llm::LlmMessage>,
+    image: &llm::LlmImage,
+) -> Result<String, String> {
+    match settings.provider {
+        LlmProvider::Claude => {
+            let key = settings
+                .claude_api_key
+                .as_ref()
+                .ok_or("Claude API key not configured")?;
+            llm::call_claude_vision(key, messages, image).await
+        }
+        LlmProvider::Ollama => {
+            Err("vision refinement is not supported for the Ollama provider".to_string())
+        }
+    }
+}
+
+// One render-and-critique refinement pass over a freshly generated SVG. The
+// SVG is rasterized locally and shown back to a vision model, which returns an
+// improved version. Any failure (unsupported provider, render error, bad
+// response) falls back to the original candidate — refinement only ever helps,
+// never blocks. Shared by both image generation and regeneration.
+async fn refine_image(
+    settings: &Settings,
+    candidate: image::GeneratedImage,
+    source: &str,
+    context: &str,
+    reading_level: &str,
+    topic: Option<&str>,
+) -> image::GeneratedImage {
+    use base64::Engine;
+
+    let png = match image::rasterize_svg_to_png(&candidate.svg) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("image refine: rasterize failed, keeping first pass: {e}");
+            return candidate;
+        }
+    };
+    let llm_image = llm::LlmImage {
+        media_type: "image/png".to_string(),
+        base64_data: base64::engine::general_purpose::STANDARD.encode(&png),
+    };
+    let messages =
+        image::build_critique_messages(source, context, &candidate.caption, reading_level, topic);
+    match dispatch_llm_vision(settings, messages, &llm_image).await {
+        Ok(resp) => match image::parse_image_response(&resp) {
+            Ok(refined) => refined,
+            Err(e) => {
+                eprintln!("image refine: parse failed, keeping first pass: {e}");
+                candidate
+            }
+        },
+        Err(e) => {
+            eprintln!("image refine: vision call skipped, keeping first pass: {e}");
+            candidate
+        }
+    }
+}
+
 // ── Settings ─────────────────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -401,6 +465,7 @@ async fn add_image(
     let messages = image::build_image_messages(&selection, &context, reading_level, topic);
     let raw_llm = dispatch_llm(&settings, messages).await?;
     let generated = image::parse_image_response(&raw_llm)?;
+    let generated = refine_image(&settings, generated, &selection, &context, reading_level, topic).await;
     let aspect = image::aspect_ratio_of(&generated.svg);
 
     let chapter_path = chapter_path_for(&state, &chapter_id)?;
@@ -448,16 +513,17 @@ async fn regenerate_artifact(
     let raw_file = std::fs::read_to_string(&chapter_path)
         .map_err(|e| format!("failed to read chapter: {e}"))?;
     let page = edupage::read(&raw_file)?;
-    let artifact = page
+    let (source, current_svg) = page
         .artifacts
         .iter()
         .find(|a| a.id == artifact_id)
+        .map(|a| (a.source.clone(), a.body.clone()))
         .ok_or_else(|| format!("artifact {artifact_id} not found"))?;
 
     let settings = state.settings.lock().unwrap().clone();
     let messages = image::build_regenerate_messages(
-        &artifact.source,
-        &artifact.body,
+        &source,
+        &current_svg,
         &instruction,
         &context,
         reading_level,
@@ -465,6 +531,7 @@ async fn regenerate_artifact(
     );
     let raw_llm = dispatch_llm(&settings, messages).await?;
     let generated = image::parse_image_response(&raw_llm)?;
+    let generated = refine_image(&settings, generated, &source, &context, reading_level, topic).await;
     let new_aspect = image::aspect_ratio_of(&generated.svg);
 
     let (new_raw, _) = edupage::regenerate_artifact(
