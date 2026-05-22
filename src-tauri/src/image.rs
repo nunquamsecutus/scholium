@@ -27,9 +27,13 @@ pub fn build_image_messages(
         "You generate SVG illustrations for educational content for a reader at \
          {} reading level.{}\n\n\
          Given a highlighted passage and its surrounding paragraph, create a \
-         clear, simple SVG that helps the reader visualize what it describes.\n\n\
+         clear SVG that helps the reader visualize what it describes.\n\n\
          Return ONLY a JSON object with this shape (no markdown, no code fence):\n\
-         {{\"svg\": \"<svg viewBox=\\\"...\\\">…</svg>\", \"caption\": \"short description\"}}\n\n\
+         {{\"plan\": \"...\", \"svg\": \"<svg viewBox=\\\"...\\\">…</svg>\", \"caption\": \"short description\"}}\n\n\
+         Fill \"plan\" FIRST: in 2-4 sentences, describe the composition before \
+         you draw — the key elements, how they're arranged, and their approximate \
+         positions and sizes within the viewBox coordinate space. Then draw the \
+         SVG to match that plan; this planning step markedly improves the result.\n\n\
          SVG requirements:\n\
          - Must include a viewBox attribute.\n\
          - Use only basic shapes (rect, circle, ellipse, line, path, polygon, polyline) and a small palette.\n\
@@ -79,7 +83,10 @@ pub fn build_regenerate_messages(
          a revised version that applies the change while keeping the same \
          general subject.\n\n\
          Return ONLY a JSON object (no markdown, no code fence):\n\
-         {{\"svg\": \"<svg viewBox=\\\"...\\\">…</svg>\", \"caption\": \"short description\"}}\n\n\
+         {{\"plan\": \"...\", \"svg\": \"<svg viewBox=\\\"...\\\">…</svg>\", \"caption\": \"short description\"}}\n\n\
+         Fill \"plan\" FIRST: in 2-4 sentences, describe how the revised \
+         composition will look and what changes from the current image, then \
+         draw the SVG to match that plan.\n\n\
          Same SVG rules as before: a viewBox attribute; only basic shapes; \
          transparent background; stroke=\"currentColor\" where lines should \
          adapt to the page text color; no <image>, <foreignObject>, <script>, \
@@ -205,6 +212,22 @@ mod tests {
     fn parse_rejects_non_svg() {
         let r = r#"{"svg": "not an svg", "caption": "x"}"#;
         assert!(parse_image_response(r).is_err());
+    }
+
+    #[test]
+    fn parse_ignores_plan_field() {
+        let r = r#"{"plan": "a circle then a box", "svg": "<svg viewBox=\"0 0 10 10\"></svg>", "caption": "c"}"#;
+        let img = parse_image_response(r).unwrap();
+        assert!(img.svg.contains("<svg"));
+        assert_eq!(img.caption, "c");
+    }
+
+    #[test]
+    fn image_prompt_requests_a_plan_first() {
+        let msgs = build_image_messages("x", "y", "adult", None);
+        let system = msgs.iter().find(|m| m.role == "system").unwrap();
+        assert!(system.content.contains("plan"));
+        assert!(system.content.contains("\"plan\""));
     }
 
     #[test]
