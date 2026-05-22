@@ -1,5 +1,24 @@
 use crate::llm::LlmMessage;
+use crate::settings::ImageQuality;
 use serde::Deserialize;
+
+/// The target each quality level is judged against during refinement.
+pub fn quality_description(q: &ImageQuality) -> &'static str {
+    match q {
+        ImageQuality::Fast => {
+            "a quick rough sketch: simple shapes that convey the basic idea; \
+             rough proportions and minor flaws are acceptable"
+        }
+        ImageQuality::Medium => {
+            "a clear, tidy illustration: elements are recognizable, proportions \
+             are reasonable, and there is no obvious error or clutter"
+        }
+        ImageQuality::High => {
+            "a polished, detailed illustration: accurate proportions, a clean and \
+             balanced composition, refined detail, and clear labels where helpful"
+        }
+    }
+}
 
 fn reading_level_description(level: &str) -> &'static str {
     match level {
@@ -107,12 +126,14 @@ pub fn build_regenerate_messages(
     ]
 }
 
-/// Build messages for the render-and-critique refinement pass. The rendered
-/// PNG is attached separately by the vision call; this asks the model to
-/// critique what it sees against the intent and return an improved SVG.
-pub fn build_critique_messages(
+/// Build messages for one evaluate-and-maybe-improve pass. The rendered PNG is
+/// attached separately by the vision call. The model judges the rendering
+/// against `quality` and either declares it good enough or returns an improved
+/// SVG.
+pub fn build_evaluate_messages(
     source: &str,
     context: &str,
+    quality: &str,
     caption: &str,
     reading_level: &str,
     book_topic: Option<&str>,
@@ -128,26 +149,30 @@ pub fn build_critique_messages(
     };
 
     let system = format!(
-        "You improve SVG illustrations for educational content for a reader at \
-         {} reading level.{}\n\n\
-         You are shown the current rendering of an illustration along with the \
-         intent it should convey. Critique it honestly — proportions, clarity, \
-         whether each element is recognizable, clutter, and whether it actually \
-         matches the intent — then produce an improved SVG.\n\n\
+        "You evaluate and improve SVG illustrations for educational content for a \
+         reader at {} reading level.{}\n\n\
+         You are shown the current rendering of an illustration, the intent it \
+         should convey, and a target quality bar. Judge honestly whether the \
+         rendering already meets the target quality.\n\n\
          Return ONLY a JSON object (no markdown, no code fence):\n\
-         {{\"plan\": \"...\", \"svg\": \"<svg viewBox=\\\"...\\\">…</svg>\", \"caption\": \"...\"}}\n\n\
-         Put your critique and the specific fixes you'll make in \"plan\", then \
-         draw the improved SVG. Same SVG rules: a viewBox; only basic shapes; \
-         transparent background; stroke=\"currentColor\" where lines should adapt \
-         to the page text color; no <image>, <foreignObject>, <script>, external \
-         references, or embedded fonts; compact.",
+         {{\"meets\": true|false, \"plan\": \"...\", \"svg\": \"<svg viewBox=\\\"...\\\">…</svg>\", \"caption\": \"...\"}}\n\n\
+         - If it already meets the target, return {{\"meets\": true}} and nothing else.\n\
+         - If it does NOT meet the target, return \"meets\": false, put your \
+           critique and the specific fixes in \"plan\", and provide an improved \
+           \"svg\" and \"caption\".\n\n\
+         SVG rules: a viewBox; only basic shapes; transparent background; \
+         stroke=\"currentColor\" where lines should adapt to the page text color; \
+         no <image>, <foreignObject>, <script>, external references, or embedded \
+         fonts; compact.",
         reading_level_description(reading_level),
         topic_clause,
     );
 
     let user = format!(
         "Intent: an illustration of {source}.{context_clause}\nCurrent caption: {caption}\n\n\
-         The attached image is the current rendering. Critique it, then return the improved SVG."
+         Target quality: {quality}.\n\n\
+         The attached image is the current rendering. Judge whether it meets the \
+         target quality, and improve it if it does not."
     );
 
     vec![
@@ -200,6 +225,23 @@ pub fn parse_image_response(response: &str) -> Result<GeneratedImage, String> {
         return Err("response did not contain an <svg> element".to_string());
     }
     Ok(img)
+}
+
+/// The result of an evaluate-and-maybe-improve pass. When `meets` is true the
+/// rendering passed the quality bar and `svg` is typically absent; otherwise
+/// `svg`/`caption` carry the improved illustration.
+#[derive(Debug, Deserialize)]
+pub struct ImageEvaluation {
+    pub meets: bool,
+    #[serde(default)]
+    pub svg: Option<String>,
+    #[serde(default)]
+    pub caption: String,
+}
+
+pub fn parse_image_evaluation(response: &str) -> Result<ImageEvaluation, String> {
+    let json = extract_json(response);
+    serde_json::from_str(&json).map_err(|e| format!("failed to parse image evaluation: {e}"))
 }
 
 fn extract_json(s: &str) -> String {
@@ -355,14 +397,46 @@ mod tests {
     }
 
     #[test]
-    fn critique_prompt_asks_to_critique_then_improve() {
-        let msgs = build_critique_messages("a black hole", "", "a black hole", "adult", None);
+    fn evaluate_prompt_includes_quality_target_and_meets_field() {
+        let msgs = build_evaluate_messages(
+            "a black hole",
+            "",
+            "a polished, detailed illustration",
+            "a black hole",
+            "adult",
+            None,
+        );
         let system = msgs.iter().find(|m| m.role == "system").unwrap();
-        assert!(system.content.to_lowercase().contains("critique"));
-        assert!(system.content.contains("\"plan\""));
+        assert!(system.content.contains("\"meets\""));
         let user = msgs.iter().find(|m| m.role == "user").unwrap();
-        assert!(user.content.contains("a black hole"));
+        assert!(user.content.contains("Target quality: a polished, detailed illustration"));
         assert!(user.content.contains("attached image"));
+    }
+
+    #[test]
+    fn quality_descriptions_differ_by_level() {
+        let fast = quality_description(&ImageQuality::Fast);
+        let medium = quality_description(&ImageQuality::Medium);
+        let high = quality_description(&ImageQuality::High);
+        assert!(fast.contains("rough"));
+        assert!(medium.contains("tidy"));
+        assert!(high.contains("polished"));
+    }
+
+    #[test]
+    fn parse_evaluation_meets_true() {
+        let eval = parse_image_evaluation(r#"{"meets": true}"#).unwrap();
+        assert!(eval.meets);
+        assert!(eval.svg.is_none());
+    }
+
+    #[test]
+    fn parse_evaluation_with_improvement() {
+        let r = r#"{"meets": false, "plan": "fix it", "svg": "<svg viewBox=\"0 0 1 1\"></svg>", "caption": "c"}"#;
+        let eval = parse_image_evaluation(r).unwrap();
+        assert!(!eval.meets);
+        assert_eq!(eval.svg.as_deref(), Some("<svg viewBox=\"0 0 1 1\"></svg>"));
+        assert_eq!(eval.caption, "c");
     }
 
     #[test]

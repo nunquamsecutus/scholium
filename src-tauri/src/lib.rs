@@ -60,38 +60,18 @@ async fn dispatch_llm_vision(
     }
 }
 
-// Number of render-and-critique passes run after the first-pass SVG. Each
-// pass critiques the previous pass's rendering, so quality compounds.
-const IMAGE_REFINEMENT_PASSES: usize = 2;
+// Upper bound on evaluate-and-improve iterations, so a never-satisfied model
+// can't loop forever.
+const MAX_REFINEMENT_ITERATIONS: usize = 5;
 
-// A single render-and-critique pass: rasterize the candidate, show it to a
-// vision model, and parse the improved SVG it returns.
-async fn refine_image_once(
-    settings: &Settings,
-    candidate: &image::GeneratedImage,
-    source: &str,
-    context: &str,
-    reading_level: &str,
-    topic: Option<&str>,
-) -> Result<image::GeneratedImage, String> {
-    use base64::Engine;
-
-    let png = image::rasterize_svg_to_png(&candidate.svg)?;
-    let llm_image = llm::LlmImage {
-        media_type: "image/png".to_string(),
-        base64_data: base64::engine::general_purpose::STANDARD.encode(&png),
-    };
-    let messages =
-        image::build_critique_messages(source, context, &candidate.caption, reading_level, topic);
-    let resp = dispatch_llm_vision(settings, messages, &llm_image).await?;
-    image::parse_image_response(&resp)
-}
-
-// Run the refinement loop over a freshly generated SVG. Each pass feeds the
-// previous result back through render-and-critique. Any failure (unsupported
-// provider, render error, bad response) stops the loop and keeps the best
-// result so far — refinement only ever helps, never blocks. Shared by both
-// image generation and regeneration.
+// Quality-gated refinement loop. Each iteration renders the current SVG and
+// asks a vision model whether it meets the target quality (mapped from the
+// configured image_quality). If it does, the SVG is returned unchanged; if
+// not, the model's improved SVG becomes the new candidate and the loop
+// re-evaluates — up to MAX_REFINEMENT_ITERATIONS. Any failure (unsupported
+// provider, render error, bad response, or no usable improvement) stops the
+// loop and keeps the best result so far — refinement only ever helps, never
+// blocks. Shared by image generation and regeneration.
 async fn refine_image(
     settings: &Settings,
     mut candidate: image::GeneratedImage,
@@ -100,14 +80,59 @@ async fn refine_image(
     reading_level: &str,
     topic: Option<&str>,
 ) -> image::GeneratedImage {
-    for pass in 0..IMAGE_REFINEMENT_PASSES {
-        match refine_image_once(settings, &candidate, source, context, reading_level, topic).await {
-            Ok(refined) => candidate = refined,
+    use base64::Engine;
+
+    let quality = image::quality_description(&settings.image_quality);
+
+    for _ in 0..MAX_REFINEMENT_ITERATIONS {
+        let png = match image::rasterize_svg_to_png(&candidate.svg) {
+            Ok(p) => p,
             Err(e) => {
-                eprintln!(
-                    "image refine: pass {} skipped, keeping current best: {e}",
-                    pass + 1
-                );
+                eprintln!("image refine: rasterize failed, keeping current: {e}");
+                break;
+            }
+        };
+        let llm_image = llm::LlmImage {
+            media_type: "image/png".to_string(),
+            base64_data: base64::engine::general_purpose::STANDARD.encode(&png),
+        };
+        let messages = image::build_evaluate_messages(
+            source,
+            context,
+            quality,
+            &candidate.caption,
+            reading_level,
+            topic,
+        );
+        let resp = match dispatch_llm_vision(settings, messages, &llm_image).await {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("image refine: vision call skipped, keeping current: {e}");
+                break;
+            }
+        };
+        let eval = match image::parse_image_evaluation(&resp) {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("image refine: parse failed, keeping current: {e}");
+                break;
+            }
+        };
+
+        if eval.meets {
+            break; // Already at the target quality.
+        }
+        match eval.svg {
+            Some(svg) if svg.trim_start().starts_with("<svg") => {
+                let caption = if eval.caption.trim().is_empty() {
+                    candidate.caption
+                } else {
+                    eval.caption
+                };
+                candidate = image::GeneratedImage { svg, caption };
+            }
+            _ => {
+                eprintln!("image refine: model wanted changes but gave no svg; keeping current");
                 break;
             }
         }
