@@ -6,16 +6,19 @@ use serde::Deserialize;
 pub fn quality_description(q: &ImageQuality) -> &'static str {
     match q {
         ImageQuality::Fast => {
-            "a quick rough sketch: simple shapes that convey the basic idea; \
-             rough proportions and minor flaws are acceptable"
+            "a clear, tidy illustration: every element is recognizable, \
+             proportions are reasonable, and there is no obvious error or clutter"
         }
         ImageQuality::Medium => {
-            "a clear, tidy illustration: elements are recognizable, proportions \
-             are reasonable, and there is no obvious error or clutter"
-        }
-        ImageQuality::High => {
             "a polished, detailed illustration: accurate proportions, a clean and \
              balanced composition, refined detail, and clear labels where helpful"
+        }
+        ImageQuality::High => {
+            "a professional, publication-ready illustration: precise proportions \
+             and perspective, a sophisticated and deliberately balanced \
+             composition, careful use of color and shading to convey depth and \
+             form, fine detail throughout, and clear, well-placed labels — \
+             visually engaging and indistinguishable from textbook-grade artwork"
         }
     }
 }
@@ -483,9 +486,9 @@ mod tests {
         let fast = quality_description(&ImageQuality::Fast);
         let medium = quality_description(&ImageQuality::Medium);
         let high = quality_description(&ImageQuality::High);
-        assert!(fast.contains("rough"));
-        assert!(medium.contains("tidy"));
-        assert!(high.contains("polished"));
+        assert!(fast.contains("tidy"));
+        assert!(medium.contains("polished"));
+        assert!(high.contains("publication-ready"));
     }
 
     #[test]
