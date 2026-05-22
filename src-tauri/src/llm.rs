@@ -14,11 +14,12 @@ pub struct LlmImage {
 
 /// Default text model for general work (onboarding, chapters, notes, …).
 pub const CLAUDE_DEFAULT_MODEL: &str = "claude-sonnet-4-6";
-/// Stronger model for the harder task of authoring SVG illustrations.
-pub const CLAUDE_GENERATION_MODEL: &str = "claude-opus-4-7";
-/// Vision model used to critique a rendered illustration — judging is easier
-/// than generating, so a lighter model suffices.
-pub const CLAUDE_CRITIQUE_MODEL: &str = "claude-sonnet-4-6";
+/// Model used to author SVG illustrations.
+pub const CLAUDE_GENERATION_MODEL: &str = "claude-sonnet-4-6";
+/// Vision model used to critique a rendered illustration. Pairing a stronger
+/// critic with a faster generator: the critic sets the bar, the generator
+/// iterates toward it.
+pub const CLAUDE_CRITIQUE_MODEL: &str = "claude-opus-4-7";
 
 // POST a prepared request body to the Claude messages API and return the
 // first text block. Shared by the text and vision calls.
