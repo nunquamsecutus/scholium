@@ -58,47 +58,59 @@ async fn dispatch_llm_vision(
     }
 }
 
-// One render-and-critique refinement pass over a freshly generated SVG. The
-// SVG is rasterized locally and shown back to a vision model, which returns an
-// improved version. Any failure (unsupported provider, render error, bad
-// response) falls back to the original candidate — refinement only ever helps,
-// never blocks. Shared by both image generation and regeneration.
-async fn refine_image(
+// Number of render-and-critique passes run after the first-pass SVG. Each
+// pass critiques the previous pass's rendering, so quality compounds.
+const IMAGE_REFINEMENT_PASSES: usize = 2;
+
+// A single render-and-critique pass: rasterize the candidate, show it to a
+// vision model, and parse the improved SVG it returns.
+async fn refine_image_once(
     settings: &Settings,
-    candidate: image::GeneratedImage,
+    candidate: &image::GeneratedImage,
     source: &str,
     context: &str,
     reading_level: &str,
     topic: Option<&str>,
-) -> image::GeneratedImage {
+) -> Result<image::GeneratedImage, String> {
     use base64::Engine;
 
-    let png = match image::rasterize_svg_to_png(&candidate.svg) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("image refine: rasterize failed, keeping first pass: {e}");
-            return candidate;
-        }
-    };
+    let png = image::rasterize_svg_to_png(&candidate.svg)?;
     let llm_image = llm::LlmImage {
         media_type: "image/png".to_string(),
         base64_data: base64::engine::general_purpose::STANDARD.encode(&png),
     };
     let messages =
         image::build_critique_messages(source, context, &candidate.caption, reading_level, topic);
-    match dispatch_llm_vision(settings, messages, &llm_image).await {
-        Ok(resp) => match image::parse_image_response(&resp) {
-            Ok(refined) => refined,
+    let resp = dispatch_llm_vision(settings, messages, &llm_image).await?;
+    image::parse_image_response(&resp)
+}
+
+// Run the refinement loop over a freshly generated SVG. Each pass feeds the
+// previous result back through render-and-critique. Any failure (unsupported
+// provider, render error, bad response) stops the loop and keeps the best
+// result so far — refinement only ever helps, never blocks. Shared by both
+// image generation and regeneration.
+async fn refine_image(
+    settings: &Settings,
+    mut candidate: image::GeneratedImage,
+    source: &str,
+    context: &str,
+    reading_level: &str,
+    topic: Option<&str>,
+) -> image::GeneratedImage {
+    for pass in 0..IMAGE_REFINEMENT_PASSES {
+        match refine_image_once(settings, &candidate, source, context, reading_level, topic).await {
+            Ok(refined) => candidate = refined,
             Err(e) => {
-                eprintln!("image refine: parse failed, keeping first pass: {e}");
-                candidate
+                eprintln!(
+                    "image refine: pass {} skipped, keeping current best: {e}",
+                    pass + 1
+                );
+                break;
             }
-        },
-        Err(e) => {
-            eprintln!("image refine: vision call skipped, keeping first pass: {e}");
-            candidate
         }
     }
+    candidate
 }
 
 // ── Settings ─────────────────────────────────────────────────────────────────
