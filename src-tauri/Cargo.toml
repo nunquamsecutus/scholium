@@ -30,4 +30,5 @@ uuid = { version = "1", features = ["v4"] }
 sha1 = "0.10"
 resvg = "0.44"
 base64 = "0.22"
+keyring = { version = "3", features = ["apple-native"] }
 

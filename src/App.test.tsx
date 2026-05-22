@@ -11,6 +11,10 @@ vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn().mockResolvedValue(null),
 }));
 
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: vi.fn().mockResolvedValue(() => {}),
+}));
+
 describe("App / WelcomeModal", () => {
   it("renders the app name", () => {
     const { getByText } = render(() => <App />);

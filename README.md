@@ -14,11 +14,17 @@ It is probably wise to figure out some nature of content filtering. Ensure the u
 
 # Running
 
+Configure the LLM provider and keys in-app via the **Settings** menu (⌘,).
+Settings persist to a config file in the app config dir, and the Claude API
+key is stored in the OS keyring. The CLI flags below remain available as a
+dev override.
+
 ## Claude
 `npm run tauri dev -- -- --api-key sk-ant-...`
-or just set the env var
-`ANTHROPIC_API_KEY=sk-ant-... npm run tauri dev`
+
+The `ANTHROPIC_API_KEY` env var is deprecated: on first launch it is migrated
+into the keyring once, after which Settings is the source of truth.
 
 # Ollama
 `npm run tauri dev -- -- --ollama-url http://localhost:11434 --ollama-model mistral`
-  
+

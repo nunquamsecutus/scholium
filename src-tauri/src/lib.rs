@@ -1,4 +1,5 @@
 mod chapter;
+mod config;
 mod define;
 mod edupage;
 mod expand;
@@ -9,8 +10,9 @@ mod onboarding;
 mod rewrite;
 mod settings;
 
-use settings::{LlmProvider, PublicSettings, Settings};
-use tauri::Manager;
+use settings::{ImageQuality, LlmProvider, PublicSettings, Settings};
+use tauri::menu::{Menu, MenuItem, MenuItemKind};
+use tauri::{Emitter, Manager};
 use tauri_plugin_cli::CliExt;
 
 pub struct AppState {
@@ -118,6 +120,62 @@ async fn refine_image(
 #[tauri::command]
 fn get_settings(state: tauri::State<'_, AppState>) -> PublicSettings {
     PublicSettings::from(&*state.settings.lock().unwrap())
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsUpdate {
+    provider: String,
+    ollama_url: String,
+    ollama_model: String,
+    image_quality: String,
+    /// Some(non-empty) sets the key; None leaves it unchanged.
+    #[serde(default)]
+    claude_api_key: Option<String>,
+    /// When true, removes the stored key (overrides claude_api_key).
+    #[serde(default)]
+    clear_claude_key: bool,
+}
+
+#[tauri::command]
+fn update_settings(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    update: SettingsUpdate,
+) -> Result<PublicSettings, String> {
+    let provider = match update.provider.as_str() {
+        "claude" => LlmProvider::Claude,
+        "ollama" => LlmProvider::Ollama,
+        other => return Err(format!("unknown provider: {other}")),
+    };
+    let image_quality = match update.image_quality.as_str() {
+        "fast" => ImageQuality::Fast,
+        "medium" => ImageQuality::Medium,
+        "high" => ImageQuality::High,
+        other => return Err(format!("unknown image quality: {other}")),
+    };
+
+    let mut settings = state.settings.lock().unwrap();
+    settings.provider = provider;
+    settings.ollama_url = update.ollama_url;
+    settings.ollama_model = update.ollama_model;
+    settings.image_quality = image_quality;
+
+    if update.clear_claude_key {
+        config::keyring_delete()?;
+        settings.claude_api_key = None;
+    } else if let Some(key) = update.claude_api_key {
+        let key = key.trim();
+        if !key.is_empty() {
+            config::keyring_set(key)?;
+            settings.claude_api_key = Some(key.to_string());
+        }
+    }
+
+    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    config::save_config(&dir, &settings.to_config())?;
+
+    Ok(PublicSettings::from(&*settings))
 }
 
 // ── Generic LLM call (used by future chapter generation) ─────────────────────
@@ -946,6 +1004,29 @@ pub fn run() {
         .setup(|app| {
             let mut settings = Settings::default();
 
+            // 1. Persisted non-secret config (provider, Ollama, image quality).
+            if let Ok(dir) = app.path().app_config_dir() {
+                if let Some(cfg) = config::load_config(&dir) {
+                    settings.apply_config(&cfg);
+                }
+            }
+
+            // 2. Claude key from the OS keyring.
+            settings.claude_api_key = config::keyring_get();
+
+            // 3. Deprecated bridge: migrate ANTHROPIC_API_KEY into the keyring
+            //    once, when nothing is stored yet. Afterwards the keyring is the
+            //    source of truth and the env var is ignored.
+            if settings.claude_api_key.is_none() {
+                if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
+                    if !key.is_empty() {
+                        let _ = config::keyring_set(&key);
+                        settings.claude_api_key = Some(key);
+                    }
+                }
+            }
+
+            // 4. CLI flags remain a dev override layered on top (not persisted).
             if let Ok(matches) = app.cli().matches() {
                 if let Some(arg) = matches.args.get("api-key") {
                     if let serde_json::Value::String(key) = &arg.value {
@@ -976,15 +1057,6 @@ pub fn run() {
                 }
             }
 
-            if settings.claude_api_key.is_none() {
-                if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
-                    if !key.is_empty() {
-                        settings.claude_api_key = Some(key);
-                        settings.provider = LlmProvider::Claude;
-                    }
-                }
-            }
-
             app.manage(AppState {
                 settings: std::sync::Mutex::new(settings),
                 book_path: std::sync::Mutex::new(None),
@@ -992,8 +1064,25 @@ pub fn run() {
 
             Ok(())
         })
+        .menu(|handle| {
+            // Preserve the platform default menu (Edit copy/paste, etc.) and
+            // add a Settings… item to the app submenu (⌘, on macOS).
+            let settings_item =
+                MenuItem::with_id(handle, "settings", "Settings…", true, Some("CmdOrCtrl+,"))?;
+            let menu = Menu::default(handle)?;
+            if let Some(MenuItemKind::Submenu(app_menu)) = menu.items()?.into_iter().next() {
+                app_menu.insert(&settings_item, 1)?;
+            }
+            Ok(menu)
+        })
+        .on_menu_event(|app, event| {
+            if event.id().0 == "settings" {
+                let _ = app.emit("open-settings", ());
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             get_settings,
+            update_settings,
             call_llm,
             begin_onboarding,
             continue_onboarding,
