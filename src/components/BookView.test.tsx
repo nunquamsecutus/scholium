@@ -4,6 +4,7 @@ import BookView from "./BookView";
 import type { Manifest } from "../types/manifest";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
+vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn().mockResolvedValue(() => {}) }));
 vi.mock("marked", () => ({ marked: { parse: (s: string) => `<p>${s}</p>` } }));
 vi.mock("dompurify", () => ({ default: { sanitize: (s: string) => s } }));
 

@@ -85,6 +85,28 @@ async fn dispatch_llm_vision(
 // can't loop forever.
 const MAX_REFINEMENT_ITERATIONS: usize = 5;
 
+// Progress emitted to the frontend during image work: the current candidate
+// SVG and which pass produced it (1 = initial draw, then one per refinement).
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ImageProgress {
+    pass: usize,
+    max: usize,
+    svg: String,
+}
+
+fn emit_image_progress(app: &tauri::AppHandle, pass: usize, svg: &str) {
+    let _ = app.emit(
+        "image-progress",
+        ImageProgress {
+            pass,
+            // Total renders = the initial draw plus the refinement cap.
+            max: MAX_REFINEMENT_ITERATIONS + 1,
+            svg: svg.to_string(),
+        },
+    );
+}
+
 // Quality-gated refinement loop. Each iteration renders the current SVG and
 // asks a vision model whether it meets the target quality (mapped from the
 // configured image_quality). If it does, the SVG is returned unchanged; if
@@ -94,6 +116,7 @@ const MAX_REFINEMENT_ITERATIONS: usize = 5;
 // loop and keeps the best result so far — refinement only ever helps, never
 // blocks. Shared by image generation and regeneration.
 async fn refine_image(
+    app: &tauri::AppHandle,
     settings: &Settings,
     mut candidate: image::GeneratedImage,
     source: &str,
@@ -104,8 +127,10 @@ async fn refine_image(
     use base64::Engine;
 
     let quality = image::quality_description(&settings.image_quality);
+    // Show the freshly drawn image while the first critique runs.
+    emit_image_progress(app, 1, &candidate.svg);
 
-    for _ in 0..MAX_REFINEMENT_ITERATIONS {
+    for i in 0..MAX_REFINEMENT_ITERATIONS {
         // Critique pass (vision, lighter model): render and judge.
         let png = match image::rasterize_svg_to_png(&candidate.svg) {
             Ok(p) => p,
@@ -156,7 +181,10 @@ async fn refine_image(
         );
         match dispatch_image_generation(settings, improve_messages).await {
             Ok(resp) => match image::parse_image_response(&resp) {
-                Ok(improved) => candidate = improved,
+                Ok(improved) => {
+                    candidate = improved;
+                    emit_image_progress(app, i + 2, &candidate.svg);
+                }
                 Err(e) => {
                     eprintln!("image refine: improvement parse failed, keeping current: {e}");
                     break;
@@ -564,6 +592,7 @@ async fn add_endnote(
 
 #[tauri::command]
 async fn add_image(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     chapter_id: String,
     selection: String,
@@ -591,7 +620,7 @@ async fn add_image(
     let messages = image::build_image_messages(&selection, &context, reading_level, topic);
     let raw_llm = dispatch_image_generation(&settings, messages).await?;
     let generated = image::parse_image_response(&raw_llm)?;
-    let generated = refine_image(&settings, generated, &selection, &context, reading_level, topic).await;
+    let generated = refine_image(&app, &settings, generated, &selection, &context, reading_level, topic).await;
     let aspect = image::aspect_ratio_of(&generated.svg);
 
     let chapter_path = chapter_path_for(&state, &chapter_id)?;
@@ -615,6 +644,7 @@ async fn add_image(
 
 #[tauri::command]
 async fn regenerate_artifact(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     chapter_id: String,
     artifact_id: u32,
@@ -657,7 +687,7 @@ async fn regenerate_artifact(
     );
     let raw_llm = dispatch_image_generation(&settings, messages).await?;
     let generated = image::parse_image_response(&raw_llm)?;
-    let generated = refine_image(&settings, generated, &source, &context, reading_level, topic).await;
+    let generated = refine_image(&app, &settings, generated, &source, &context, reading_level, topic).await;
     let new_aspect = image::aspect_ratio_of(&generated.svg);
 
     let (new_raw, _) = edupage::regenerate_artifact(

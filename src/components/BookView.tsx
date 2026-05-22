@@ -1,5 +1,6 @@
 import { createSignal, createEffect, createMemo, For, Match, onCleanup, onMount, Show, Switch } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { marked } from "marked";
 import DOMPurify from "dompurify";
 import type { Chapter, Manifest } from "../types/manifest";
@@ -223,6 +224,13 @@ export default function BookView(props: Props) {
   // Message shown in the floating busy pill while a highlight-driven LLM
   // action is in flight; null when idle.
   const [busy, setBusy] = createSignal<string | null>(null);
+  // Live preview streamed from the backend during image work: the current
+  // candidate SVG and which pass produced it.
+  const [imageProgress, setImageProgress] = createSignal<{
+    pass: number;
+    max: number;
+    svg: string;
+  } | null>(null);
   // The artifact whose controls overlay is currently shown (id + the figure's
   // viewport rect for positioning), and whether the delete confirm is open.
   const [activeArtifact, setActiveArtifact] = createSignal<{
@@ -370,6 +378,17 @@ export default function BookView(props: Props) {
     onCleanup(() => document.removeEventListener("keydown", onKey));
   });
 
+  // Live image-generation progress streamed from the backend.
+  onMount(() => {
+    const unlisten = listen<{ pass: number; max: number; svg: string }>(
+      "image-progress",
+      (e) => setImageProgress(e.payload),
+    );
+    onCleanup(() => {
+      unlisten.then((un) => un());
+    });
+  });
+
   function jumpToEndnote(noteId: number) {
     const article = articleRef();
     if (!article) return;
@@ -471,6 +490,7 @@ export default function BookView(props: Props) {
     const instruction = editInstruction().trim();
     if (!edit || !chapterId || !instruction || editSending()) return;
     setEditSending(true);
+    setImageProgress(null);
     setBusy("Redrawing…");
     try {
       const result = await invoke<ChapterContent>("regenerate_artifact", {
@@ -490,6 +510,7 @@ export default function BookView(props: Props) {
     } finally {
       setEditSending(false);
       setBusy(null);
+      setImageProgress(null);
     }
   }
 
@@ -557,6 +578,7 @@ export default function BookView(props: Props) {
   ) {
     const chapterId = selectedId();
     if (!chapterId) return;
+    setImageProgress(null);
     setBusy(busyMessage);
     try {
       const result = await invoke<ChapterContent>(command, args);
@@ -569,6 +591,7 @@ export default function BookView(props: Props) {
       setError(String(e));
     } finally {
       setBusy(null);
+      setImageProgress(null);
     }
   }
 
@@ -874,9 +897,25 @@ export default function BookView(props: Props) {
         />
 
         <Show when={busy()}>
-          <div class="busy-pill" role="status" aria-live="polite">
-            <BookLoader />
-            {busy()}
+          <div
+            class={`busy-pill${imageProgress() ? " busy-pill--preview" : ""}`}
+            role="status"
+            aria-live="polite"
+          >
+            <Show when={imageProgress()}>
+              {(p) => (
+                <div class="busy-preview" innerHTML={DOMPurify.sanitize(p().svg)} />
+              )}
+            </Show>
+            <div class="busy-pill-row">
+              <BookLoader />
+              <span>
+                {busy()}
+                <Show when={imageProgress()}>
+                  {(p) => <> (Pass {p().pass}/{p().max})</>}
+                </Show>
+              </span>
+            </div>
           </div>
         </Show>
 
