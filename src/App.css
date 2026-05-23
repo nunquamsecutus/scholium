@@ -596,6 +596,111 @@ body {
   outline: none;
 }
 
+/* ── Import view ───────────────────────────────────── */
+
+.import-shell {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  min-height: 100vh;
+  padding: 32px;
+}
+
+.import-card {
+  width: 100%;
+  max-width: 560px;
+  max-height: 85vh;
+  background: var(--modal-bg);
+  border-radius: var(--modal-radius);
+  box-shadow: var(--modal-shadow);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  color: var(--color-text);
+}
+
+.import-header {
+  padding: 22px 28px 12px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.import-title {
+  margin: 0;
+  font-size: 1.2rem;
+  font-weight: 700;
+}
+
+.import-instructions {
+  margin: 4px 0 0;
+  color: var(--color-text-muted);
+  font-size: 0.9rem;
+}
+
+.import-list {
+  list-style: none;
+  margin: 0;
+  padding: 14px 18px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.import-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  background: var(--color-input-bg);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  cursor: grab;
+  user-select: none;
+  font-size: 0.92rem;
+  transition: background 0.1s, border-color 0.1s, opacity 0.1s;
+}
+
+.import-item:hover {
+  border-color: var(--color-primary);
+}
+
+.import-item--dragging {
+  opacity: 0.4;
+  cursor: grabbing;
+}
+
+.import-grip {
+  color: var(--color-text-muted);
+  font-size: 1.1rem;
+  line-height: 1;
+}
+
+.import-position {
+  color: var(--color-text-muted);
+  min-width: 28px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.import-filename {
+  flex: 1;
+  font-family: "SF Mono", "Fira Code", monospace;
+  font-size: 0.88rem;
+  color: var(--color-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.import-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  padding: 16px 24px;
+  border-top: 1px solid var(--color-border);
+}
+
 /* ── Settings modal ─────────────────────────────────── */
 
 .settings-backdrop {

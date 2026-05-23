@@ -43,4 +43,9 @@ describe("App / WelcomeModal", () => {
     const { getByText } = render(() => <App />);
     expect(getByText("Open Existing Book")).toBeInTheDocument();
   });
+
+  it("renders the Import Book option", () => {
+    const { getByText } = render(() => <App />);
+    expect(getByText("Import Book")).toBeInTheDocument();
+  });
 });

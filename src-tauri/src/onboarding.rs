@@ -132,7 +132,7 @@ fn extract_json(s: &str) -> String {
     s.to_string()
 }
 
-fn slugify(s: &str) -> String {
+pub fn slugify(s: &str) -> String {
     s.to_lowercase()
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })

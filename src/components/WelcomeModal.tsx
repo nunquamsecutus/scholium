@@ -6,12 +6,38 @@ import type { Manifest } from "../types/manifest";
 interface Props {
   onTopic: (topic: string) => void;
   onBook: (manifest: Manifest) => void;
+  onImport: (directory: string, files: string[]) => void;
 }
 
 export default function WelcomeModal(props: Props) {
   const [topic, setTopic] = createSignal("");
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal("");
+
+  async function handleImport() {
+    setError("");
+    const result = await open({
+      title: "Choose a folder of markdown files",
+      directory: true,
+      multiple: false,
+    });
+    if (!result) return;
+    const path = Array.isArray(result) ? result[0] : result;
+
+    setBusy(true);
+    try {
+      const files = await invoke<string[]>("scan_markdown_directory", { path });
+      if (files.length === 0) {
+        setError("No markdown files found in that folder.");
+        return;
+      }
+      props.onImport(path, files);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function handleOpenBook() {
     setError("");
@@ -66,6 +92,9 @@ export default function WelcomeModal(props: Props) {
           </button>
           <button class="btn-text" onClick={handleOpenBook} disabled={busy()}>
             Open Existing Book
+          </button>
+          <button class="btn-text" onClick={handleImport} disabled={busy()}>
+            Import Book
           </button>
         </div>
       </div>

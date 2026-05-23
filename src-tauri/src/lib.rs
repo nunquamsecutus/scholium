@@ -4,6 +4,7 @@ mod define;
 mod edupage;
 mod expand;
 mod image;
+mod import;
 mod llm;
 mod manifest;
 mod onboarding;
@@ -1059,6 +1060,41 @@ fn create_book(
 }
 
 #[tauri::command]
+fn scan_markdown_directory(path: String) -> Result<Vec<String>, String> {
+    import::scan_markdown(std::path::Path::new(&path))
+}
+
+#[tauri::command]
+fn import_book(
+    state: tauri::State<'_, AppState>,
+    source_dir: String,
+    dest_path: String,
+    ordered_files: Vec<String>,
+) -> Result<manifest::Manifest, String> {
+    let book = import::import_book(
+        std::path::Path::new(&source_dir),
+        std::path::Path::new(&dest_path),
+        &ordered_files,
+    )?;
+
+    // Mirror create_book: derive the actual manifest path from dest_path stem
+    // and store it on the AppState so subsequent commands resolve chapters.
+    let stem = std::path::Path::new(&dest_path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .ok_or("invalid destination path")?
+        .to_string();
+    let manifest_path = std::path::Path::new(&dest_path)
+        .parent()
+        .ok_or("invalid destination path")?
+        .join(&stem)
+        .join(format!("{stem}.edubook"));
+    *state.book_path.lock().unwrap() = Some(manifest_path);
+
+    Ok(book)
+}
+
+#[tauri::command]
 fn load_book(
     state: tauri::State<'_, AppState>,
     path: String,
@@ -1175,6 +1211,8 @@ pub fn run() {
             generate_lesson_plan,
             create_book,
             load_book,
+            scan_markdown_directory,
+            import_book,
             generate_chapter,
             read_chapter,
             define_word,
