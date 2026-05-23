@@ -718,6 +718,17 @@ export default function BookView(props: Props) {
     });
   }
 
+  async function handleDrawDiagram(phrase: string, range: Range) {
+    const r = resolvePhrase(phrase, range);
+    if (!r) return;
+    await runContentCommand("Drawing a diagram…", "add_diagram", {
+      chapterId: r.chapterId,
+      selection: phrase,
+      occurrenceIndex: r.occurrence,
+      context: r.context,
+    });
+  }
+
   async function handleRewrite(phrase: string, range: Range) {
     const r = resolvePhrase(phrase, range);
     if (!r) return;
@@ -896,6 +907,7 @@ export default function BookView(props: Props) {
           onRewrite={handleRewrite}
           onRewriteConversation={handleRewriteConversation}
           onDrawPicture={handleDrawPicture}
+          onDrawDiagram={handleDrawDiagram}
         />
 
         <Show when={busy()}>

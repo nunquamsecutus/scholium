@@ -1,6 +1,7 @@
 mod chapter;
 mod config;
 mod define;
+mod diagram;
 mod edupage;
 mod expand;
 mod image;
@@ -108,39 +109,25 @@ fn emit_progress(app: &tauri::AppHandle, phase: &str, pass: usize, max: usize, s
     );
 }
 
-// Run the per-quality image pipeline:
-//   1. Compose the illustration in prose (text-only).
-//   2. For each polish phase:
-//        - Optionally critique the current image (vision).
-//        - Run N render iterations. The very first iteration of the pipeline
-//          generates the initial SVG from the composition; every other
-//          iteration polishes the current SVG (vision, with the latest
-//          critique threaded in when one exists).
-// Any failure inside the polish loop stops further work and keeps the best
-// SVG produced so far. A failed composition or first render is fatal — we
-// have nothing to show.
-async fn run_image_pipeline(
+// Shared polish loop used by both the image and diagram pipelines. Given a
+// composition (already produced by an earlier text call) and per-kind prompt
+// builders, run the configured render/critique/polish steps and return the
+// best SVG produced. A failed first render is fatal; later failures stop the
+// loop and keep the best result so far.
+async fn run_polish_loop(
     app: &tauri::AppHandle,
     settings: &Settings,
-    source: &str,
-    context: &str,
-    extra_instruction: Option<&str>,
+    composition: String,
+    pipeline: &image::ImagePipeline,
+    build_initial_render: fn(&str) -> Vec<llm::LlmMessage>,
+    build_polish: fn(&str, Option<&str>) -> Vec<llm::LlmMessage>,
+    build_critique: fn() -> Vec<llm::LlmMessage>,
 ) -> Result<image::GeneratedImage, String> {
     use base64::Engine;
 
-    let pipeline = image::pipeline_for(&settings.image_quality);
-    let max = image::total_iterations(&pipeline);
-
-    // 1. Composition.
-    emit_progress(app, "composition", 0, max, "");
-    let comp_messages = image::build_composition_messages(source, context, extra_instruction);
-    let composition = dispatch_image_text(settings, pipeline.composition_model, comp_messages)
-        .await?
-        .trim()
-        .to_string();
+    let max = image::total_iterations(pipeline);
     let caption = image::derive_caption(&composition);
 
-    // 2. Polish phases.
     let mut svg: Option<String> = None;
     let mut critique: Option<String> = None;
     let mut pass: usize = 0;
@@ -154,7 +141,7 @@ async fn run_image_pipeline(
                         media_type: "image/png".to_string(),
                         base64_data: base64::engine::general_purpose::STANDARD.encode(&png),
                     };
-                    let crit_messages = image::build_critique_messages();
+                    let crit_messages = build_critique();
                     match dispatch_image_vision(
                         settings,
                         pipeline.critique_model,
@@ -164,7 +151,7 @@ async fn run_image_pipeline(
                     .await
                     {
                         Ok(resp) => critique = Some(resp.trim().to_string()),
-                        Err(e) => eprintln!("image pipeline: critique skipped: {e}"),
+                        Err(e) => eprintln!("artifact pipeline: critique skipped: {e}"),
                     }
                 }
             }
@@ -172,20 +159,13 @@ async fn run_image_pipeline(
 
         for _ in 0..step.iterations {
             pass += 1;
-            emit_progress(
-                app,
-                "rendering",
-                pass,
-                max,
-                svg.as_deref().unwrap_or(""),
-            );
+            emit_progress(app, "rendering", pass, max, svg.as_deref().unwrap_or(""));
 
             if let Some(current) = svg.clone() {
-                // Polish: vision call with the current rendering.
                 let png = match image::rasterize_svg_to_png(&current) {
                     Ok(p) => p,
                     Err(e) => {
-                        eprintln!("image pipeline: rasterize failed, stopping polish: {e}");
+                        eprintln!("artifact pipeline: rasterize failed, stopping polish: {e}");
                         break;
                     }
                 };
@@ -193,7 +173,7 @@ async fn run_image_pipeline(
                     media_type: "image/png".to_string(),
                     base64_data: base64::engine::general_purpose::STANDARD.encode(&png),
                 };
-                let messages = image::build_polish_messages(&composition, critique.as_deref());
+                let messages = build_polish(&composition, critique.as_deref());
                 match dispatch_image_vision(settings, pipeline.polish_model, messages, &llm_image)
                     .await
                 {
@@ -203,24 +183,18 @@ async fn run_image_pipeline(
                             emit_progress(app, "rendering", pass, max, &next);
                         }
                         Err(e) => {
-                            eprintln!("image pipeline: polish returned no <svg>: {e}");
-                            // keep current; try the next iteration anyway
+                            eprintln!("artifact pipeline: polish returned no <svg>: {e}");
                         }
                     },
                     Err(e) => {
-                        eprintln!("image pipeline: polish call failed, stopping: {e}");
+                        eprintln!("artifact pipeline: polish call failed, stopping: {e}");
                         break;
                     }
                 }
             } else {
-                // First render: text-only, from the composition.
-                let messages = image::build_initial_render_messages(&composition);
-                let resp = dispatch_image_text(
-                    settings,
-                    pipeline.first_render_model,
-                    messages,
-                )
-                .await?;
+                let messages = build_initial_render(&composition);
+                let resp =
+                    dispatch_image_text(settings, pipeline.first_render_model, messages).await?;
                 let initial = image::extract_svg(&resp)?;
                 svg = Some(initial.clone());
                 emit_progress(app, "rendering", pass, max, &initial);
@@ -230,6 +204,66 @@ async fn run_image_pipeline(
 
     let svg = svg.ok_or("no SVG was produced")?;
     Ok(image::GeneratedImage { svg, caption })
+}
+
+async fn run_image_pipeline(
+    app: &tauri::AppHandle,
+    settings: &Settings,
+    source: &str,
+    context: &str,
+    extra_instruction: Option<&str>,
+) -> Result<image::GeneratedImage, String> {
+    let pipeline = image::pipeline_for(&settings.image_quality);
+    let max = image::total_iterations(&pipeline);
+
+    emit_progress(app, "composition", 0, max, "");
+    let comp_messages = image::build_composition_messages(source, context, extra_instruction);
+    let composition = dispatch_image_text(settings, pipeline.composition_model, comp_messages)
+        .await?
+        .trim()
+        .to_string();
+
+    run_polish_loop(
+        app,
+        settings,
+        composition,
+        &pipeline,
+        image::build_initial_render_messages,
+        image::build_polish_messages,
+        image::build_critique_messages,
+    )
+    .await
+}
+
+async fn run_diagram_pipeline(
+    app: &tauri::AppHandle,
+    settings: &Settings,
+    source: &str,
+    context: &str,
+    reading_level: &str,
+    original_prompt: Option<&str>,
+) -> Result<image::GeneratedImage, String> {
+    let pipeline = image::pipeline_for(&settings.image_quality);
+    let max = image::total_iterations(&pipeline);
+
+    emit_progress(app, "composition", 0, max, "");
+    let comp_messages =
+        diagram::build_composition_messages(source, context, reading_level, original_prompt);
+    let composition = dispatch_image_text(settings, pipeline.composition_model, comp_messages)
+        .await?
+        .trim()
+        .to_string();
+
+    run_polish_loop(
+        app,
+        settings,
+        composition,
+        &pipeline,
+        diagram::build_initial_render_messages,
+        diagram::build_polish_messages,
+        diagram::build_critique_messages,
+    )
+    .await
 }
 
 // ── Settings ─────────────────────────────────────────────────────────────────
@@ -665,6 +699,65 @@ async fn add_image(
 }
 
 #[tauri::command]
+async fn add_diagram(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    chapter_id: String,
+    selection: String,
+    occurrence_index: u32,
+    context: String,
+) -> Result<ChapterContent, String> {
+    if selection.trim().is_empty() {
+        return Err("empty selection".to_string());
+    }
+    if context.trim().is_empty() {
+        return Err("empty context".to_string());
+    }
+
+    let book_path = state
+        .book_path
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("no book is open")?;
+    let book = manifest::load(&book_path)?;
+    let reading_level = book.metadata.reading_level.as_deref().unwrap_or("adult");
+    // The original learning prompt becomes the domain hint, skipped when empty
+    // (which is the case for imported books).
+    let original_prompt = Some(book.metadata.prompt.as_str()).filter(|s| !s.is_empty());
+
+    let settings = state.settings.lock().unwrap().clone();
+    let generated = run_diagram_pipeline(
+        &app,
+        &settings,
+        &selection,
+        &context,
+        reading_level,
+        original_prompt,
+    )
+    .await?;
+    let aspect = image::aspect_ratio_of(&generated.svg);
+
+    let chapter_path = chapter_path_for(&state, &chapter_id)?;
+    let raw_file = std::fs::read_to_string(&chapter_path)
+        .map_err(|e| format!("failed to read chapter: {e}"))?;
+    let (new_raw, _) = edupage::add_artifact(
+        &raw_file,
+        &selection,
+        occurrence_index,
+        &generated.svg,
+        &generated.caption,
+        aspect,
+        "diagram",
+    )?;
+    std::fs::write(&chapter_path, &new_raw)
+        .map_err(|e| format!("failed to write chapter: {e}"))?;
+
+    let page = edupage::read(&new_raw)?;
+    Ok(ChapterContent::from_page(page))
+}
+
+#[tauri::command]
 async fn regenerate_artifact(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
@@ -681,17 +774,40 @@ async fn regenerate_artifact(
     let raw_file = std::fs::read_to_string(&chapter_path)
         .map_err(|e| format!("failed to read chapter: {e}"))?;
     let page = edupage::read(&raw_file)?;
-    let source = page
+    let artifact = page
         .artifacts
         .iter()
         .find(|a| a.id == artifact_id)
-        .map(|a| a.source.clone())
         .ok_or_else(|| format!("artifact {artifact_id} not found"))?;
+    let source = artifact.source.clone();
+    let semantic_type = artifact.semantic_type.clone();
 
     let settings = state.settings.lock().unwrap().clone();
-    // The user's instruction lives in the composition step; the rest of the
-    // pipeline runs the same as a fresh image.
-    let generated = run_image_pipeline(&app, &settings, &source, &context, Some(&instruction)).await?;
+    // Dispatch to the pipeline matching the artifact's kind. The user's
+    // instruction is folded into the composition step.
+    let generated = if semantic_type == "diagram" {
+        let book_path = state
+            .book_path
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or("no book is open")?;
+        let book = manifest::load(&book_path)?;
+        let reading_level = book.metadata.reading_level.as_deref().unwrap_or("adult");
+        let original_prompt = Some(book.metadata.prompt.as_str()).filter(|s| !s.is_empty());
+        let combined_source = format!("{source} (with this change: {instruction})");
+        run_diagram_pipeline(
+            &app,
+            &settings,
+            &combined_source,
+            &context,
+            reading_level,
+            original_prompt,
+        )
+        .await?
+    } else {
+        run_image_pipeline(&app, &settings, &source, &context, Some(&instruction)).await?
+    };
     let new_aspect = image::aspect_ratio_of(&generated.svg);
 
     let (new_raw, _) = edupage::regenerate_artifact(
@@ -1228,6 +1344,7 @@ pub fn run() {
             converse_about_rewrite,
             rewrite_with_conversation,
             add_image,
+            add_diagram,
             delete_artifact,
             regenerate_artifact,
         ])

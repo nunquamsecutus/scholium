@@ -10,6 +10,7 @@ interface Props {
   onRewrite?: (phrase: string, range: Range) => void;
   onRewriteConversation?: (rewriteId: number, range: Range) => void;
   onDrawPicture?: (phrase: string, range: Range) => void;
+  onDrawDiagram?: (phrase: string, range: Range) => void;
 }
 
 type Mode = "primary" | "expand";
@@ -120,6 +121,13 @@ export default function SelectionToolbar(props: Props) {
     props.onDrawPicture?.(p, r);
   }
 
+  function drawDiagram() {
+    const p = phrase();
+    const r = range();
+    if (!p || !r) return;
+    props.onDrawDiagram?.(p, r);
+  }
+
   onMount(() => {
     document.addEventListener("selectionchange", update);
     onCleanup(() => document.removeEventListener("selectionchange", update));
@@ -158,6 +166,9 @@ export default function SelectionToolbar(props: Props) {
             </button>
             <button type="button" class="selection-action" onClick={drawPicture}>
               Draw a picture
+            </button>
+            <button type="button" class="selection-action" onClick={drawDiagram}>
+              Diagram
             </button>
           </Show>
         </Show>
