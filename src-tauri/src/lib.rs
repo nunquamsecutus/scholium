@@ -235,6 +235,9 @@ async fn run_image_pipeline(
     .await
 }
 
+// Sonnet plans + draws, Haiku evaluates. The loop exits early when both of
+// Haiku's 5-point scores (help / ease) reach diagram::SATISFACTORY_SCORE, or
+// after diagram::MAX_ITERATIONS improvement passes.
 async fn run_diagram_pipeline(
     app: &tauri::AppHandle,
     settings: &Settings,
@@ -243,27 +246,91 @@ async fn run_diagram_pipeline(
     reading_level: &str,
     original_prompt: Option<&str>,
 ) -> Result<image::GeneratedImage, String> {
-    let pipeline = image::pipeline_for(&settings.image_quality);
-    let max = image::total_iterations(&pipeline);
+    use base64::Engine;
 
+    let max = diagram::TOTAL_PASSES;
+
+    // 1. Composition (Sonnet text).
     emit_progress(app, "composition", 0, max, "");
     let comp_messages =
         diagram::build_composition_messages(source, context, reading_level, original_prompt);
-    let composition = dispatch_image_text(settings, pipeline.composition_model, comp_messages)
+    let composition = dispatch_image_text(settings, llm::CLAUDE_SONNET_MODEL, comp_messages)
         .await?
         .trim()
         .to_string();
+    let caption = image::derive_caption(&composition);
 
-    run_polish_loop(
-        app,
-        settings,
-        composition,
-        &pipeline,
-        diagram::build_initial_render_messages,
-        diagram::build_polish_messages,
-        diagram::build_critique_messages,
-    )
-    .await
+    // 2. Initial render (Sonnet text).
+    let mut pass: usize = 1;
+    emit_progress(app, "rendering", pass, max, "");
+    let init_messages = diagram::build_initial_render_messages(&composition);
+    let resp = dispatch_image_text(settings, llm::CLAUDE_SONNET_MODEL, init_messages).await?;
+    let mut svg = image::extract_svg(&resp)?;
+    emit_progress(app, "rendering", pass, max, &svg);
+
+    // 3. Evaluate-and-improve loop (Haiku judges, Sonnet redraws).
+    for _ in 0..diagram::MAX_ITERATIONS {
+        emit_progress(app, "critique", pass, max, &svg);
+
+        let png = match image::rasterize_svg_to_png(&svg) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("diagram pipeline: rasterize failed, stopping: {e}");
+                break;
+            }
+        };
+        let llm_image = llm::LlmImage {
+            media_type: "image/png".to_string(),
+            base64_data: base64::engine::general_purpose::STANDARD.encode(&png),
+        };
+        let eval_messages = diagram::build_evaluation_messages(source);
+        let score = match dispatch_image_vision(
+            settings,
+            llm::CLAUDE_HAIKU_MODEL,
+            eval_messages,
+            &llm_image,
+        )
+        .await
+        {
+            Ok(resp) => match diagram::parse_diagram_score(&resp) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("diagram pipeline: score parse failed, keeping current: {e}");
+                    break;
+                }
+            },
+            Err(e) => {
+                eprintln!("diagram pipeline: eval call skipped, keeping current: {e}");
+                break;
+            }
+        };
+
+        if score.is_satisfactory() {
+            break;
+        }
+
+        pass += 1;
+        emit_progress(app, "rendering", pass, max, &svg);
+        let improve_messages = diagram::build_improve_messages(&composition, &svg, &score);
+        match dispatch_image_text(settings, llm::CLAUDE_SONNET_MODEL, improve_messages).await {
+            Ok(resp) => match image::extract_svg(&resp) {
+                Ok(next) => {
+                    svg = next.clone();
+                    emit_progress(app, "rendering", pass, max, &svg);
+                }
+                Err(e) => {
+                    eprintln!("diagram pipeline: improve returned no <svg>, keeping current: {e}");
+                    break;
+                }
+            },
+            Err(e) => {
+                eprintln!("diagram pipeline: improve call failed, keeping current: {e}");
+                break;
+            }
+        }
+    }
+
+    Ok(image::GeneratedImage { svg, caption })
 }
 
 // ── Settings ─────────────────────────────────────────────────────────────────
