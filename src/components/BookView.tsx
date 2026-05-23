@@ -224,9 +224,11 @@ export default function BookView(props: Props) {
   // Message shown in the floating busy pill while a highlight-driven LLM
   // action is in flight; null when idle.
   const [busy, setBusy] = createSignal<string | null>(null);
-  // Live preview streamed from the backend during image work: the current
-  // candidate SVG and which pass produced it.
+  // Live preview streamed from the backend during image work: the active
+  // pipeline phase, the current candidate SVG, and which render pass produced
+  // it. `phase` is one of "composition" | "rendering" | "critique".
   const [imageProgress, setImageProgress] = createSignal<{
+    phase: string;
     pass: number;
     max: number;
     svg: string;
@@ -380,7 +382,7 @@ export default function BookView(props: Props) {
 
   // Live image-generation progress streamed from the backend.
   onMount(() => {
-    const unlisten = listen<{ pass: number; max: number; svg: string }>(
+    const unlisten = listen<{ phase: string; pass: number; max: number; svg: string }>(
       "image-progress",
       (e) => setImageProgress(e.payload),
     );
@@ -898,13 +900,13 @@ export default function BookView(props: Props) {
 
         <Show when={busy()}>
           <div
-            class={`busy-pill${imageProgress() ? " busy-pill--preview" : ""}`}
+            class={`busy-pill${imageProgress()?.svg ? " busy-pill--preview" : ""}`}
             role="status"
             aria-live="polite"
           >
-            <Show when={imageProgress()}>
-              {(p) => (
-                <div class="busy-preview" innerHTML={DOMPurify.sanitize(p().svg)} />
+            <Show when={imageProgress()?.svg}>
+              {(svg) => (
+                <div class="busy-preview" innerHTML={DOMPurify.sanitize(svg())} />
               )}
             </Show>
             <div class="busy-pill-row">
@@ -912,7 +914,11 @@ export default function BookView(props: Props) {
               <span>
                 {busy()}
                 <Show when={imageProgress()}>
-                  {(p) => <> (Pass {p().pass}/{p().max})</>}
+                  {(p) => {
+                    if (p().phase === "composition") return <> (Composing…)</>;
+                    if (p().phase === "critique") return <> (Critiquing…)</>;
+                    return <> (Pass {p().pass}/{p().max})</>;
+                  }}
                 </Show>
               </span>
             </div>

@@ -40,10 +40,11 @@ async fn dispatch_llm(
     }
 }
 
-// SVG authoring dispatch. Uses the stronger generation model on Claude;
-// Ollama uses its configured model as usual.
-async fn dispatch_image_generation(
+// Text dispatch for the image pipeline. On Claude the caller picks the model
+// (different phases use different models); Ollama uses its configured model.
+async fn dispatch_image_text(
     settings: &Settings,
+    model: &str,
     messages: Vec<llm::LlmMessage>,
 ) -> Result<String, String> {
     match settings.provider {
@@ -52,7 +53,7 @@ async fn dispatch_image_generation(
                 .claude_api_key
                 .as_ref()
                 .ok_or("Claude API key not configured — set it in Settings (⌘,)")?;
-            llm::call_claude(key, llm::CLAUDE_GENERATION_MODEL, messages).await
+            llm::call_claude(key, model, messages).await
         }
         LlmProvider::Ollama => {
             llm::call_ollama(&settings.ollama_url, &settings.ollama_model, messages).await
@@ -60,11 +61,11 @@ async fn dispatch_image_generation(
     }
 }
 
-// Vision dispatch for critiquing a rendered illustration. Uses the lighter
-// critique model on Claude. Only Claude is implemented; Ollama returns an
-// error so the refinement loop falls back to the un-judged result.
-async fn dispatch_llm_vision(
+// Vision dispatch for the image pipeline. Only Claude is implemented; Ollama
+// returns an error so the polish loop falls back to the current candidate.
+async fn dispatch_image_vision(
     settings: &Settings,
+    model: &str,
     messages: Vec<llm::LlmMessage>,
     image: &llm::LlmImage,
 ) -> Result<String, String> {
@@ -74,130 +75,161 @@ async fn dispatch_llm_vision(
                 .claude_api_key
                 .as_ref()
                 .ok_or("Claude API key not configured")?;
-            llm::call_claude_vision(key, llm::CLAUDE_CRITIQUE_MODEL, messages, image).await
+            llm::call_claude_vision(key, model, messages, image).await
         }
         LlmProvider::Ollama => {
-            Err("vision refinement is not supported for the Ollama provider".to_string())
+            Err("vision polish is not supported for the Ollama provider".to_string())
         }
     }
 }
 
-// Upper bound on evaluate-and-improve iterations, so a never-satisfied model
-// can't loop forever.
-const MAX_REFINEMENT_ITERATIONS: usize = 5;
-
-// Progress emitted to the frontend during image work: the current candidate
-// SVG and which pass produced it (1 = initial draw, then one per refinement).
+// Progress emitted to the frontend during image work. `phase` tells the UI
+// what's happening (composing, rendering an iteration, critiquing); `pass`
+// counts completed render iterations toward `max` (the total in the active
+// pipeline); `svg` is the latest candidate (empty before the first render).
 #[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ImageProgress {
+    phase: String,
     pass: usize,
     max: usize,
     svg: String,
 }
 
-fn emit_image_progress(app: &tauri::AppHandle, pass: usize, svg: &str) {
+fn emit_progress(app: &tauri::AppHandle, phase: &str, pass: usize, max: usize, svg: &str) {
     let _ = app.emit(
         "image-progress",
         ImageProgress {
+            phase: phase.to_string(),
             pass,
-            // Total renders = the initial draw plus the refinement cap.
-            max: MAX_REFINEMENT_ITERATIONS + 1,
+            max,
             svg: svg.to_string(),
         },
     );
 }
 
-// Quality-gated refinement loop. Each iteration renders the current SVG and
-// asks a vision model whether it meets the target quality (mapped from the
-// configured image_quality). If it does, the SVG is returned unchanged; if
-// not, the model's improved SVG becomes the new candidate and the loop
-// re-evaluates — up to MAX_REFINEMENT_ITERATIONS. Any failure (unsupported
-// provider, render error, bad response, or no usable improvement) stops the
-// loop and keeps the best result so far — refinement only ever helps, never
-// blocks. Shared by image generation and regeneration.
-async fn refine_image(
+// Run the per-quality image pipeline:
+//   1. Compose the illustration in prose (text-only).
+//   2. For each polish phase:
+//        - Optionally critique the current image (vision).
+//        - Run N render iterations. The very first iteration of the pipeline
+//          generates the initial SVG from the composition; every other
+//          iteration polishes the current SVG (vision, with the latest
+//          critique threaded in when one exists).
+// Any failure inside the polish loop stops further work and keeps the best
+// SVG produced so far. A failed composition or first render is fatal — we
+// have nothing to show.
+async fn run_image_pipeline(
     app: &tauri::AppHandle,
     settings: &Settings,
-    mut candidate: image::GeneratedImage,
     source: &str,
     context: &str,
-    reading_level: &str,
-    topic: Option<&str>,
-) -> image::GeneratedImage {
+    extra_instruction: Option<&str>,
+) -> Result<image::GeneratedImage, String> {
     use base64::Engine;
 
-    let quality = image::quality_description(&settings.image_quality);
-    // Show the freshly drawn image while the first critique runs.
-    emit_image_progress(app, 1, &candidate.svg);
+    let pipeline = image::pipeline_for(&settings.image_quality);
+    let max = image::total_iterations(&pipeline);
 
-    for i in 0..MAX_REFINEMENT_ITERATIONS {
-        // Critique pass (vision, lighter model): render and judge.
-        let png = match image::rasterize_svg_to_png(&candidate.svg) {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("image refine: rasterize failed, keeping current: {e}");
-                break;
-            }
-        };
-        let llm_image = llm::LlmImage {
-            media_type: "image/png".to_string(),
-            base64_data: base64::engine::general_purpose::STANDARD.encode(&png),
-        };
-        let judge_messages = image::build_judge_messages(
-            source,
-            context,
-            quality,
-            &candidate.caption,
-            reading_level,
-            topic,
-        );
-        let judgment = match dispatch_llm_vision(settings, judge_messages, &llm_image).await {
-            Ok(resp) => match image::parse_image_judgment(&resp) {
-                Ok(j) => j,
-                Err(e) => {
-                    eprintln!("image refine: judgment parse failed, keeping current: {e}");
-                    break;
+    // 1. Composition.
+    emit_progress(app, "composition", 0, max, "");
+    let comp_messages = image::build_composition_messages(source, context, extra_instruction);
+    let composition = dispatch_image_text(settings, pipeline.composition_model, comp_messages)
+        .await?
+        .trim()
+        .to_string();
+    let caption = image::derive_caption(&composition);
+
+    // 2. Polish phases.
+    let mut svg: Option<String> = None;
+    let mut critique: Option<String> = None;
+    let mut pass: usize = 0;
+
+    for step in &pipeline.steps {
+        if step.critique_first {
+            if let Some(current) = &svg {
+                emit_progress(app, "critique", pass, max, current);
+                if let Ok(png) = image::rasterize_svg_to_png(current) {
+                    let llm_image = llm::LlmImage {
+                        media_type: "image/png".to_string(),
+                        base64_data: base64::engine::general_purpose::STANDARD.encode(&png),
+                    };
+                    let crit_messages = image::build_critique_messages();
+                    match dispatch_image_vision(
+                        settings,
+                        pipeline.critique_model,
+                        crit_messages,
+                        &llm_image,
+                    )
+                    .await
+                    {
+                        Ok(resp) => critique = Some(resp.trim().to_string()),
+                        Err(e) => eprintln!("image pipeline: critique skipped: {e}"),
+                    }
                 }
-            },
-            Err(e) => {
-                eprintln!("image refine: critique skipped, keeping current: {e}");
-                break;
             }
-        };
-
-        if judgment.meets {
-            break; // Already at the target quality.
         }
 
-        // Improvement pass (text, stronger model): redraw from the critique.
-        let improve_messages = image::build_improve_messages(
-            source,
-            context,
-            quality,
-            &candidate.svg,
-            &judgment.critique,
-            reading_level,
-            topic,
-        );
-        match dispatch_image_generation(settings, improve_messages).await {
-            Ok(resp) => match image::parse_image_response(&resp) {
-                Ok(improved) => {
-                    candidate = improved;
-                    emit_image_progress(app, i + 2, &candidate.svg);
+        for _ in 0..step.iterations {
+            pass += 1;
+            emit_progress(
+                app,
+                "rendering",
+                pass,
+                max,
+                svg.as_deref().unwrap_or(""),
+            );
+
+            if let Some(current) = svg.clone() {
+                // Polish: vision call with the current rendering.
+                let png = match image::rasterize_svg_to_png(&current) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        eprintln!("image pipeline: rasterize failed, stopping polish: {e}");
+                        break;
+                    }
+                };
+                let llm_image = llm::LlmImage {
+                    media_type: "image/png".to_string(),
+                    base64_data: base64::engine::general_purpose::STANDARD.encode(&png),
+                };
+                let messages = image::build_polish_messages(&composition, critique.as_deref());
+                match dispatch_image_vision(settings, pipeline.polish_model, messages, &llm_image)
+                    .await
+                {
+                    Ok(resp) => match image::extract_svg(&resp) {
+                        Ok(next) => {
+                            svg = Some(next.clone());
+                            emit_progress(app, "rendering", pass, max, &next);
+                        }
+                        Err(e) => {
+                            eprintln!("image pipeline: polish returned no <svg>: {e}");
+                            // keep current; try the next iteration anyway
+                        }
+                    },
+                    Err(e) => {
+                        eprintln!("image pipeline: polish call failed, stopping: {e}");
+                        break;
+                    }
                 }
-                Err(e) => {
-                    eprintln!("image refine: improvement parse failed, keeping current: {e}");
-                    break;
-                }
-            },
-            Err(e) => {
-                eprintln!("image refine: improvement generation failed, keeping current: {e}");
-                break;
+            } else {
+                // First render: text-only, from the composition.
+                let messages = image::build_initial_render_messages(&composition);
+                let resp = dispatch_image_text(
+                    settings,
+                    pipeline.first_render_model,
+                    messages,
+                )
+                .await?;
+                let initial = image::extract_svg(&resp)?;
+                svg = Some(initial.clone());
+                emit_progress(app, "rendering", pass, max, &initial);
             }
         }
     }
-    candidate
+
+    let svg = svg.ok_or("no SVG was produced")?;
+    Ok(image::GeneratedImage { svg, caption })
 }
 
 // ── Settings ─────────────────────────────────────────────────────────────────
@@ -607,21 +639,10 @@ async fn add_image(
         return Err("empty context".to_string());
     }
 
-    let book_path = state
-        .book_path
-        .lock()
-        .unwrap()
-        .clone()
-        .ok_or("no book is open")?;
-    let book = manifest::load(&book_path)?;
-    let reading_level = book.metadata.reading_level.as_deref().unwrap_or("adult");
-    let topic = Some(book.metadata.topic.as_str()).filter(|s| !s.is_empty());
-
+    // The pipeline doesn't consult reading_level or topic; the prompts speak
+    // directly to "professional quality art" without level-specific phrasing.
     let settings = state.settings.lock().unwrap().clone();
-    let messages = image::build_image_messages(&selection, &context, reading_level, topic);
-    let raw_llm = dispatch_image_generation(&settings, messages).await?;
-    let generated = image::parse_image_response(&raw_llm)?;
-    let generated = refine_image(&app, &settings, generated, &selection, &context, reading_level, topic).await;
+    let generated = run_image_pipeline(&app, &settings, &selection, &context, None).await?;
     let aspect = image::aspect_ratio_of(&generated.svg);
 
     let chapter_path = chapter_path_for(&state, &chapter_id)?;
@@ -656,39 +677,21 @@ async fn regenerate_artifact(
         return Err("empty instruction".to_string());
     }
 
-    let book_path = state
-        .book_path
-        .lock()
-        .unwrap()
-        .clone()
-        .ok_or("no book is open")?;
-    let book = manifest::load(&book_path)?;
-    let reading_level = book.metadata.reading_level.as_deref().unwrap_or("adult");
-    let topic = Some(book.metadata.topic.as_str()).filter(|s| !s.is_empty());
-
     let chapter_path = chapter_path_for(&state, &chapter_id)?;
     let raw_file = std::fs::read_to_string(&chapter_path)
         .map_err(|e| format!("failed to read chapter: {e}"))?;
     let page = edupage::read(&raw_file)?;
-    let (source, current_svg) = page
+    let source = page
         .artifacts
         .iter()
         .find(|a| a.id == artifact_id)
-        .map(|a| (a.source.clone(), a.body.clone()))
+        .map(|a| a.source.clone())
         .ok_or_else(|| format!("artifact {artifact_id} not found"))?;
 
     let settings = state.settings.lock().unwrap().clone();
-    let messages = image::build_regenerate_messages(
-        &source,
-        &current_svg,
-        &instruction,
-        &context,
-        reading_level,
-        topic,
-    );
-    let raw_llm = dispatch_image_generation(&settings, messages).await?;
-    let generated = image::parse_image_response(&raw_llm)?;
-    let generated = refine_image(&app, &settings, generated, &source, &context, reading_level, topic).await;
+    // The user's instruction lives in the composition step; the rest of the
+    // pipeline runs the same as a fresh image.
+    let generated = run_image_pipeline(&app, &settings, &source, &context, Some(&instruction)).await?;
     let new_aspect = image::aspect_ratio_of(&generated.svg);
 
     let (new_raw, _) = edupage::regenerate_artifact(

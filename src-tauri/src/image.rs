@@ -1,239 +1,167 @@
-use crate::llm::LlmMessage;
+use crate::llm::{LlmMessage, CLAUDE_HAIKU_MODEL, CLAUDE_OPUS_MODEL, CLAUDE_SONNET_MODEL};
 use crate::settings::ImageQuality;
-use serde::Deserialize;
 
-/// The target each quality level is judged against during refinement.
-pub fn quality_description(q: &ImageQuality) -> &'static str {
-    match q {
-        ImageQuality::Fast => {
-            "a clear, tidy illustration: every element is recognizable, \
-             proportions are reasonable, and there is no obvious error or clutter"
-        }
-        ImageQuality::Medium => {
-            "a polished, detailed illustration: accurate proportions, a clean and \
-             balanced composition, refined detail, and clear labels where helpful"
-        }
-        ImageQuality::High => {
-            "a professional, publication-ready illustration: precise proportions \
-             and perspective, a sophisticated and deliberately balanced \
-             composition, careful use of color and shading to convey depth and \
-             form, fine detail throughout, and clear, well-placed labels — \
-             visually engaging and indistinguishable from textbook-grade artwork"
-        }
+/// One polish phase: a run of N render iterations, optionally preceded by a
+/// fresh critique that's threaded into every iteration's prompt.
+#[derive(Debug, Clone)]
+pub struct PipelineStep {
+    pub iterations: usize,
+    pub critique_first: bool,
+}
+
+/// A full image pipeline for one quality level. Composition is text-only and
+/// describes the layout in prose; the first render produces the initial SVG
+/// from that prose; subsequent iterations polish the rendered image.
+#[derive(Debug, Clone)]
+pub struct ImagePipeline {
+    pub composition_model: &'static str,
+    pub first_render_model: &'static str,
+    pub polish_model: &'static str,
+    pub critique_model: &'static str,
+    pub steps: Vec<PipelineStep>,
+}
+
+pub fn pipeline_for(quality: &ImageQuality) -> ImagePipeline {
+    match quality {
+        ImageQuality::Fast => ImagePipeline {
+            composition_model: CLAUDE_SONNET_MODEL,
+            first_render_model: CLAUDE_HAIKU_MODEL,
+            polish_model: CLAUDE_HAIKU_MODEL,
+            critique_model: CLAUDE_SONNET_MODEL,
+            steps: vec![PipelineStep { iterations: 5, critique_first: false }],
+        },
+        ImageQuality::Medium => ImagePipeline {
+            composition_model: CLAUDE_SONNET_MODEL,
+            first_render_model: CLAUDE_HAIKU_MODEL,
+            polish_model: CLAUDE_HAIKU_MODEL,
+            critique_model: CLAUDE_SONNET_MODEL,
+            steps: vec![
+                PipelineStep { iterations: 5, critique_first: false },
+                PipelineStep { iterations: 5, critique_first: true },
+            ],
+        },
+        ImageQuality::High => ImagePipeline {
+            composition_model: CLAUDE_OPUS_MODEL,
+            first_render_model: CLAUDE_SONNET_MODEL,
+            polish_model: CLAUDE_HAIKU_MODEL,
+            critique_model: CLAUDE_SONNET_MODEL,
+            steps: vec![
+                PipelineStep { iterations: 5, critique_first: false },
+                PipelineStep { iterations: 5, critique_first: true },
+                PipelineStep { iterations: 5, critique_first: true },
+            ],
+        },
     }
 }
 
-fn reading_level_description(level: &str) -> &'static str {
-    match level {
-        "child" => "a child (ages 8–12)",
-        "teen" => "a teen (ages 13–17)",
-        "academic" => "a professional or postgraduate",
-        _ => "a general adult",
+pub fn total_iterations(pipeline: &ImagePipeline) -> usize {
+    pipeline.steps.iter().map(|s| s.iterations).sum()
+}
+
+const SYSTEM_PROMPT: &str = "You are making professional quality art in SVG format.";
+
+/// Compose the illustration in prose. No SVG yet — just describe the layout,
+/// the elements, their arrangement, and their relative sizes.
+pub fn build_composition_messages(
+    source: &str,
+    context: &str,
+    extra_instruction: Option<&str>,
+) -> Vec<LlmMessage> {
+    let mut user = format!("Describe the composition for an illustration of: {source}.");
+    if !context.trim().is_empty() {
+        user.push_str(&format!("\n\nSurrounding paragraph: {context}"));
     }
-}
-
-/// Build messages asking the model for an SVG illustration of the selected
-/// passage, returned as JSON `{ "svg": "...", "caption": "..." }`.
-pub fn build_image_messages(
-    selection: &str,
-    context: &str,
-    reading_level: &str,
-    book_topic: Option<&str>,
-) -> Vec<LlmMessage> {
-    let topic_clause = match book_topic {
-        Some(t) if !t.is_empty() => format!("\nThe book's subject is: {t}.\n"),
-        _ => String::new(),
-    };
-
-    let system = format!(
-        "You generate SVG illustrations for educational content for a reader at \
-         {} reading level.{}\n\n\
-         Given a highlighted passage and its surrounding paragraph, create a \
-         clear SVG that helps the reader visualize what it describes.\n\n\
-         Return ONLY a JSON object with this shape (no markdown, no code fence):\n\
-         {{\"plan\": \"...\", \"svg\": \"<svg viewBox=\\\"...\\\">…</svg>\", \"caption\": \"short description\"}}\n\n\
-         Fill \"plan\" FIRST: in 2-4 sentences, describe the composition before \
-         you draw — the key elements, how they're arranged, and their approximate \
-         positions and sizes within the viewBox coordinate space. Then draw the \
-         SVG to match that plan; this planning step markedly improves the result.\n\n\
-         SVG requirements:\n\
-         - Must include a viewBox attribute.\n\
-         - Use only basic shapes (rect, circle, ellipse, line, path, polygon, polyline) and a small palette.\n\
-         - Transparent background (no full-canvas background rectangle).\n\
-         - Use stroke=\"currentColor\" where lines should adapt to the page text color.\n\
-         - No <image>, <foreignObject>, <script>, external references, or embedded fonts.\n\
-         - Small text labels are allowed where they aid understanding.\n\
-         - Keep it compact (under ~6 kB).",
-        reading_level_description(reading_level),
-        topic_clause,
-    );
-
-    let user = format!(
-        "Highlighted passage: {selection}\n\nSurrounding paragraph: {context}\n\nGenerate the SVG."
-    );
+    if let Some(extra) = extra_instruction {
+        if !extra.trim().is_empty() {
+            user.push_str(&format!("\n\nAdditional direction: {extra}"));
+        }
+    }
+    user.push_str("\n\nReturn the composition as prose.");
 
     vec![
-        LlmMessage { role: "system".to_string(), content: system },
+        LlmMessage { role: "system".to_string(), content: SYSTEM_PROMPT.to_string() },
         LlmMessage { role: "user".to_string(), content: user },
     ]
 }
 
-/// Build messages asking the model to revise an existing SVG per the user's
-/// instruction, returned as the same JSON `{ "svg", "caption" }` shape.
-pub fn build_regenerate_messages(
-    source: &str,
-    current_svg: &str,
-    instruction: &str,
-    context: &str,
-    reading_level: &str,
-    book_topic: Option<&str>,
-) -> Vec<LlmMessage> {
-    let topic_clause = match book_topic {
-        Some(t) if !t.is_empty() => format!("\nThe book's subject is: {t}.\n"),
-        _ => String::new(),
-    };
-    let context_clause = if context.trim().is_empty() {
-        String::new()
-    } else {
-        format!("\n\nSurrounding paragraph: {context}")
-    };
-
-    let system = format!(
-        "You revise SVG illustrations for educational content for a reader at \
-         {} reading level.{}\n\n\
-         You are given an existing illustration and a requested change. Return \
-         a revised version that applies the change while keeping the same \
-         general subject.\n\n\
-         Return ONLY a JSON object (no markdown, no code fence):\n\
-         {{\"plan\": \"...\", \"svg\": \"<svg viewBox=\\\"...\\\">…</svg>\", \"caption\": \"short description\"}}\n\n\
-         Fill \"plan\" FIRST: in 2-4 sentences, describe how the revised \
-         composition will look and what changes from the current image, then \
-         draw the SVG to match that plan.\n\n\
-         Same SVG rules as before: a viewBox attribute; only basic shapes; \
-         transparent background; stroke=\"currentColor\" where lines should \
-         adapt to the page text color; no <image>, <foreignObject>, <script>, \
-         external references, or embedded fonts; compact (under ~6 kB). It is \
-         fine for the new image to have a different aspect ratio if the change \
-         calls for it.",
-        reading_level_description(reading_level),
-        topic_clause,
-    );
-
+/// Author the initial SVG from the composition. Text-only — no image yet.
+pub fn build_initial_render_messages(composition: &str) -> Vec<LlmMessage> {
     let user = format!(
-        "The illustration is about: {source}{context_clause}\n\nCurrent SVG:\n{current_svg}\n\nRequested change: {instruction}\n\nReturn the revised SVG."
+        "Composition:\n{composition}\n\nGenerate the SVG illustration. Return only the SVG."
     );
-
     vec![
-        LlmMessage { role: "system".to_string(), content: system },
+        LlmMessage { role: "system".to_string(), content: SYSTEM_PROMPT.to_string() },
         LlmMessage { role: "user".to_string(), content: user },
     ]
 }
 
-/// Build messages for the critique pass (vision). The rendered PNG is attached
-/// by the vision call. The model only judges the rendering against `quality`
-/// and describes what to fix — it does not produce SVG.
-pub fn build_judge_messages(
-    source: &str,
-    context: &str,
-    quality: &str,
-    caption: &str,
-    reading_level: &str,
-    book_topic: Option<&str>,
-) -> Vec<LlmMessage> {
-    let topic_clause = match book_topic {
-        Some(t) if !t.is_empty() => format!("\nThe book's subject is: {t}.\n"),
-        _ => String::new(),
-    };
-    let context_clause = if context.trim().is_empty() {
-        String::new()
-    } else {
-        format!("\nSurrounding paragraph: {context}")
-    };
-
-    let system = format!(
-        "You are an exacting art critic for educational illustrations aimed at a \
-         reader at {} reading level.{}\n\n\
-         You are shown the current rendering of an illustration, the intent it \
-         should convey, and a target quality bar. Judge honestly whether the \
-         rendering already meets the target.\n\n\
-         Return ONLY a JSON object (no markdown, no code fence):\n\
-         {{\"meets\": true|false, \"critique\": \"...\"}}\n\n\
-         - If it meets the target, return {{\"meets\": true}} with an empty critique.\n\
-         - If it does NOT, return \"meets\": false and a concrete critique: what is \
-           wrong (proportions, clarity, missing or unrecognizable elements, \
-           clutter, mismatch with the intent) and specifically what to change. Do \
-           not output SVG.",
-        reading_level_description(reading_level),
-        topic_clause,
+/// Polish the current rendering. The PNG is attached by the vision call.
+/// When a critique is available it's woven into the prompt; otherwise the
+/// instruction is just to make the image more professional.
+pub fn build_polish_messages(composition: &str, critique: Option<&str>) -> Vec<LlmMessage> {
+    let mut user = format!("Composition:\n{composition}\n\n");
+    if let Some(c) = critique {
+        if !c.trim().is_empty() {
+            user.push_str(&format!("Critique of the current image:\n{c}\n\n"));
+        }
+    }
+    user.push_str(
+        "The attached image is the current rendering. Polish it to make it look more \
+         professional. Return only the improved SVG.",
     );
-
-    let user = format!(
-        "Intent: an illustration of {source}.{context_clause}\nCurrent caption: {caption}\n\n\
-         Target quality: {quality}.\n\n\
-         The attached image is the current rendering. Judge whether it meets the \
-         target quality."
-    );
-
     vec![
-        LlmMessage { role: "system".to_string(), content: system },
+        LlmMessage { role: "system".to_string(), content: SYSTEM_PROMPT.to_string() },
         LlmMessage { role: "user".to_string(), content: user },
     ]
 }
 
-/// Build messages for the improvement pass (text). Given the current SVG and a
-/// critique of how it rendered, author a better SVG that addresses the critique
-/// and reaches the target quality.
-pub fn build_improve_messages(
-    source: &str,
-    context: &str,
-    quality: &str,
-    current_svg: &str,
-    critique: &str,
-    reading_level: &str,
-    book_topic: Option<&str>,
-) -> Vec<LlmMessage> {
-    let topic_clause = match book_topic {
-        Some(t) if !t.is_empty() => format!("\nThe book's subject is: {t}.\n"),
-        _ => String::new(),
-    };
-    let context_clause = if context.trim().is_empty() {
-        String::new()
-    } else {
-        format!("\nSurrounding paragraph: {context}")
-    };
-
-    let system = format!(
-        "You author SVG illustrations for educational content for a reader at {} \
-         reading level.{}\n\n\
-         You are given the current SVG and a critique of how it rendered. Produce \
-         an improved SVG that addresses every point in the critique and reaches \
-         the target quality.\n\n\
-         Return ONLY a JSON object (no markdown, no code fence):\n\
-         {{\"plan\": \"...\", \"svg\": \"<svg viewBox=\\\"...\\\">…</svg>\", \"caption\": \"...\"}}\n\n\
-         Fill \"plan\" FIRST: state how you'll address the critique and lay out the \
-         composition (elements, arrangement, approximate viewBox coordinates), \
-         then draw the SVG to match. Same SVG rules: a viewBox; only basic shapes; \
-         transparent background; stroke=\"currentColor\" where lines should adapt \
-         to the page text color; no <image>, <foreignObject>, <script>, external \
-         references, or embedded fonts; compact.",
-        reading_level_description(reading_level),
-        topic_clause,
-    );
-
-    let user = format!(
-        "Intent: an illustration of {source}.{context_clause}\n\nTarget quality: {quality}.\n\n\
-         Current SVG:\n{current_svg}\n\nCritique of the current rendering:\n{critique}\n\n\
-         Produce the improved SVG."
-    );
-
+/// Critique the current rendering. The PNG is attached by the vision call.
+pub fn build_critique_messages() -> Vec<LlmMessage> {
+    let user = "Critique the attached image. Describe how to make it more professional.";
     vec![
-        LlmMessage { role: "system".to_string(), content: system },
-        LlmMessage { role: "user".to_string(), content: user },
+        LlmMessage { role: "system".to_string(), content: SYSTEM_PROMPT.to_string() },
+        LlmMessage { role: "user".to_string(), content: user.to_string() },
     ]
+}
+
+/// Extract an `<svg …>…</svg>` block from a model response, tolerating
+/// surrounding prose or code fences.
+pub fn extract_svg(response: &str) -> Result<String, String> {
+    let start = response
+        .find("<svg")
+        .ok_or("response did not contain an <svg> element")?;
+    let after = &response[start..];
+    let close = after
+        .find("</svg>")
+        .ok_or("response had <svg> but no closing tag")?;
+    Ok(response[start..start + close + "</svg>".len()].to_string())
+}
+
+/// Trim a composition down to something usable as an image caption / alt
+/// text. First sentence if short enough, otherwise a hard truncation.
+pub fn derive_caption(composition: &str) -> String {
+    let trimmed = composition.trim();
+    if let Some(end) = trimmed.find(['.', '!', '?']) {
+        let sentence = trimmed[..end].trim();
+        if !sentence.is_empty() && sentence.chars().count() <= 80 {
+            return sentence.to_string();
+        }
+    }
+    let mut out: String = trimmed.chars().take(77).collect();
+    if trimmed.chars().count() > 77 {
+        out.push('…');
+    }
+    out
+}
+
+#[derive(Debug)]
+pub struct GeneratedImage {
+    pub svg: String,
+    pub caption: String,
 }
 
 /// Render an SVG to PNG bytes, scaled so the long edge is ~512px. Loads system
-/// fonts so any <text> renders. Used to feed the vision critique loop.
+/// fonts so any <text> renders. Used to feed the vision pipeline.
 pub fn rasterize_svg_to_png(svg: &str) -> Result<Vec<u8>, String> {
     use resvg::{tiny_skia, usvg};
 
@@ -259,62 +187,12 @@ pub fn rasterize_svg_to_png(svg: &str) -> Result<Vec<u8>, String> {
     pixmap.encode_png().map_err(|e| format!("png encode failed: {e}"))
 }
 
-#[derive(Debug, Deserialize)]
-pub struct GeneratedImage {
-    pub svg: String,
-    #[serde(default)]
-    pub caption: String,
-}
-
-/// Extract the JSON object from the model response (tolerating code fences or
-/// surrounding prose) and parse it into a GeneratedImage.
-pub fn parse_image_response(response: &str) -> Result<GeneratedImage, String> {
-    let json = extract_json(response);
-    let img: GeneratedImage = serde_json::from_str(&json)
-        .map_err(|e| format!("failed to parse image response: {e}"))?;
-    if !img.svg.trim_start().starts_with("<svg") {
-        return Err("response did not contain an <svg> element".to_string());
-    }
-    Ok(img)
-}
-
-/// The critic's verdict: whether the rendering meets the target, plus a
-/// concrete critique to feed the improvement pass when it doesn't.
-#[derive(Debug, Deserialize)]
-pub struct ImageJudgment {
-    pub meets: bool,
-    #[serde(default)]
-    pub critique: String,
-}
-
-pub fn parse_image_judgment(response: &str) -> Result<ImageJudgment, String> {
-    let json = extract_json(response);
-    serde_json::from_str(&json).map_err(|e| format!("failed to parse image judgment: {e}"))
-}
-
-fn extract_json(s: &str) -> String {
-    let trimmed = s.trim();
-    let inner = trimmed
-        .strip_prefix("```json")
-        .or_else(|| trimmed.strip_prefix("```"))
-        .map(|rest| rest.trim_start())
-        .and_then(|rest| rest.strip_suffix("```"))
-        .map(|rest| rest.trim())
-        .unwrap_or(trimmed);
-
-    match (inner.find('{'), inner.rfind('}')) {
-        (Some(start), Some(end)) if end > start => inner[start..=end].to_string(),
-        _ => inner.to_string(),
-    }
-}
-
 /// Compute the width/height aspect ratio from the SVG viewBox. Falls back to
 /// 1.0 (square) when the viewBox is missing or unparseable.
 pub fn aspect_ratio_of(svg: &str) -> f32 {
     let needle = "viewBox";
     if let Some(pos) = svg.find(needle) {
         let after = &svg[pos + needle.len()..];
-        // Skip whitespace and '=' to the opening quote.
         if let Some(q_rel) = after.find(['"', '\'']) {
             let quote = after.as_bytes()[q_rel] as char;
             let rest = &after[q_rel + 1..];
@@ -339,79 +217,101 @@ mod tests {
     use super::*;
 
     #[test]
-    fn prompt_includes_selection_and_context() {
-        let msgs = build_image_messages(
-            "gravitational collapse",
-            "A star collapses under its own gravity.",
-            "adult",
-            None,
-        );
+    fn pipeline_fast_has_one_phase_of_five() {
+        let p = pipeline_for(&ImageQuality::Fast);
+        assert_eq!(total_iterations(&p), 5);
+        assert_eq!(p.steps.len(), 1);
+        assert!(!p.steps[0].critique_first);
+        assert_eq!(p.composition_model, CLAUDE_SONNET_MODEL);
+        assert_eq!(p.first_render_model, CLAUDE_HAIKU_MODEL);
+        assert_eq!(p.polish_model, CLAUDE_HAIKU_MODEL);
+    }
+
+    #[test]
+    fn pipeline_medium_has_two_phases_with_critique() {
+        let p = pipeline_for(&ImageQuality::Medium);
+        assert_eq!(total_iterations(&p), 10);
+        assert_eq!(p.steps.len(), 2);
+        assert!(!p.steps[0].critique_first);
+        assert!(p.steps[1].critique_first);
+        assert_eq!(p.composition_model, CLAUDE_SONNET_MODEL);
+    }
+
+    #[test]
+    fn pipeline_high_uses_opus_and_three_phases() {
+        let p = pipeline_for(&ImageQuality::High);
+        assert_eq!(total_iterations(&p), 15);
+        assert_eq!(p.steps.len(), 3);
+        assert_eq!(p.composition_model, CLAUDE_OPUS_MODEL);
+        assert_eq!(p.first_render_model, CLAUDE_SONNET_MODEL);
+        assert_eq!(p.polish_model, CLAUDE_HAIKU_MODEL);
+        assert!(!p.steps[0].critique_first);
+        assert!(p.steps[1].critique_first);
+        assert!(p.steps[2].critique_first);
+    }
+
+    #[test]
+    fn composition_prompt_includes_subject_and_context() {
+        let msgs = build_composition_messages("a black hole", "Black holes warp spacetime.", None);
         let user = msgs.iter().find(|m| m.role == "user").unwrap();
-        assert!(user.content.contains("gravitational collapse"));
-        assert!(user.content.contains("collapses under its own gravity"));
-    }
-
-    #[test]
-    fn prompt_includes_reading_level_and_topic() {
-        let msgs = build_image_messages("x", "y", "child", Some("Black holes"));
+        assert!(user.content.contains("a black hole"));
+        assert!(user.content.contains("Black holes warp spacetime"));
         let system = msgs.iter().find(|m| m.role == "system").unwrap();
-        assert!(system.content.contains("child (ages 8–12)"));
-        assert!(system.content.contains("Black holes"));
+        assert!(system.content.contains("professional"));
     }
 
     #[test]
-    fn parse_plain_json() {
-        let r = r#"{"svg": "<svg viewBox=\"0 0 10 10\"></svg>", "caption": "a box"}"#;
-        let img = parse_image_response(r).unwrap();
-        assert!(img.svg.contains("<svg"));
-        assert_eq!(img.caption, "a box");
+    fn composition_prompt_includes_extra_instruction() {
+        let msgs = build_composition_messages("a thing", "", Some("make it blue"));
+        let user = msgs.iter().find(|m| m.role == "user").unwrap();
+        assert!(user.content.contains("make it blue"));
     }
 
     #[test]
-    fn parse_json_in_code_fence() {
-        let r = "```json\n{\"svg\": \"<svg viewBox=\\\"0 0 1 1\\\"></svg>\", \"caption\": \"c\"}\n```";
-        let img = parse_image_response(r).unwrap();
-        assert!(img.svg.contains("<svg"));
+    fn polish_prompt_includes_critique_when_present() {
+        let msgs = build_polish_messages("a star and orbit", Some("the orbit is lopsided"));
+        let user = msgs.iter().find(|m| m.role == "user").unwrap();
+        assert!(user.content.contains("lopsided"));
+        assert!(user.content.contains("a star and orbit"));
     }
 
     #[test]
-    fn parse_rejects_non_svg() {
-        let r = r#"{"svg": "not an svg", "caption": "x"}"#;
-        assert!(parse_image_response(r).is_err());
+    fn polish_prompt_omits_critique_section_when_none() {
+        let msgs = build_polish_messages("a star", None);
+        let user = msgs.iter().find(|m| m.role == "user").unwrap();
+        assert!(!user.content.contains("Critique"));
     }
 
     #[test]
-    fn parse_ignores_plan_field() {
-        let r = r#"{"plan": "a circle then a box", "svg": "<svg viewBox=\"0 0 10 10\"></svg>", "caption": "c"}"#;
-        let img = parse_image_response(r).unwrap();
-        assert!(img.svg.contains("<svg"));
-        assert_eq!(img.caption, "c");
+    fn extract_svg_finds_svg_block() {
+        let r = "Sure, here it is:\n<svg viewBox=\"0 0 10 10\"><circle/></svg>\nThat's it.";
+        let svg = extract_svg(r).unwrap();
+        assert!(svg.starts_with("<svg"));
+        assert!(svg.ends_with("</svg>"));
     }
 
     #[test]
-    fn image_prompt_requests_a_plan_first() {
-        let msgs = build_image_messages("x", "y", "adult", None);
-        let system = msgs.iter().find(|m| m.role == "system").unwrap();
-        assert!(system.content.contains("plan"));
-        assert!(system.content.contains("\"plan\""));
+    fn extract_svg_errors_when_missing() {
+        assert!(extract_svg("just prose, no svg").is_err());
+    }
+
+    #[test]
+    fn derive_caption_takes_first_sentence_when_short() {
+        let c = "A black hole at the center. Lots of surrounding stars.";
+        assert_eq!(derive_caption(c), "A black hole at the center");
+    }
+
+    #[test]
+    fn derive_caption_truncates_when_no_short_sentence() {
+        let long = "a ".repeat(100);
+        let cap = derive_caption(&long);
+        assert!(cap.chars().count() <= 78);
+        assert!(cap.ends_with('…'));
     }
 
     #[test]
     fn aspect_ratio_wide() {
-        let svg = r#"<svg viewBox="0 0 100 50"></svg>"#;
-        assert_eq!(aspect_ratio_of(svg), 2.0);
-    }
-
-    #[test]
-    fn aspect_ratio_tall() {
-        let svg = r#"<svg viewBox="0 0 50 100"></svg>"#;
-        assert_eq!(aspect_ratio_of(svg), 0.5);
-    }
-
-    #[test]
-    fn aspect_ratio_handles_commas() {
-        let svg = r#"<svg viewBox="0,0,200,100"></svg>"#;
-        assert_eq!(aspect_ratio_of(svg), 2.0);
+        assert_eq!(aspect_ratio_of(r#"<svg viewBox="0 0 100 50"></svg>"#), 2.0);
     }
 
     #[test]
@@ -420,96 +320,10 @@ mod tests {
     }
 
     #[test]
-    fn regenerate_prompt_includes_instruction_and_current_svg() {
-        let msgs = build_regenerate_messages(
-            "a black hole",
-            "<svg viewBox=\"0 0 10 10\"></svg>",
-            "make it more colorful",
-            "Black holes warp spacetime.",
-            "adult",
-            Some("Black holes"),
-        );
-        let user = msgs.iter().find(|m| m.role == "user").unwrap();
-        assert!(user.content.contains("make it more colorful"));
-        assert!(user.content.contains("viewBox"));
-        assert!(user.content.contains("a black hole"));
-        let system = msgs.iter().find(|m| m.role == "system").unwrap();
-        assert!(system.content.contains("Black holes"));
-    }
-
-    #[test]
-    fn regenerate_prompt_omits_context_clause_when_empty() {
-        let msgs = build_regenerate_messages("s", "<svg/>", "change", "", "adult", None);
-        let user = msgs.iter().find(|m| m.role == "user").unwrap();
-        assert!(!user.content.contains("Surrounding paragraph"));
-    }
-
-    #[test]
-    fn judge_prompt_includes_quality_target_and_meets_field() {
-        let msgs = build_judge_messages(
-            "a black hole",
-            "",
-            "a polished, detailed illustration",
-            "a black hole",
-            "adult",
-            None,
-        );
-        let system = msgs.iter().find(|m| m.role == "system").unwrap();
-        assert!(system.content.contains("\"meets\""));
-        assert!(system.content.contains("Do not output SVG"));
-        let user = msgs.iter().find(|m| m.role == "user").unwrap();
-        assert!(user.content.contains("Target quality: a polished, detailed illustration"));
-        assert!(user.content.contains("attached image"));
-    }
-
-    #[test]
-    fn improve_prompt_includes_current_svg_and_critique() {
-        let msgs = build_improve_messages(
-            "a black hole",
-            "",
-            "a polished illustration",
-            "<svg viewBox=\"0 0 10 10\"></svg>",
-            "the circle is off-center and too small",
-            "adult",
-            None,
-        );
-        let user = msgs.iter().find(|m| m.role == "user").unwrap();
-        assert!(user.content.contains("Current SVG:"));
-        assert!(user.content.contains("viewBox"));
-        assert!(user.content.contains("off-center"));
-        let system = msgs.iter().find(|m| m.role == "system").unwrap();
-        assert!(system.content.contains("\"plan\""));
-    }
-
-    #[test]
-    fn quality_descriptions_differ_by_level() {
-        let fast = quality_description(&ImageQuality::Fast);
-        let medium = quality_description(&ImageQuality::Medium);
-        let high = quality_description(&ImageQuality::High);
-        assert!(fast.contains("tidy"));
-        assert!(medium.contains("polished"));
-        assert!(high.contains("publication-ready"));
-    }
-
-    #[test]
-    fn parse_judgment_meets_true() {
-        let j = parse_image_judgment(r#"{"meets": true, "critique": ""}"#).unwrap();
-        assert!(j.meets);
-    }
-
-    #[test]
-    fn parse_judgment_with_critique() {
-        let j = parse_image_judgment(r#"{"meets": false, "critique": "fix the proportions"}"#).unwrap();
-        assert!(!j.meets);
-        assert_eq!(j.critique, "fix the proportions");
-    }
-
-    #[test]
     fn rasterize_produces_png_bytes() {
         let svg = r#"<svg viewBox="0 0 100 50" xmlns="http://www.w3.org/2000/svg"><rect width="100" height="50" fill="blue"/></svg>"#;
         let png = rasterize_svg_to_png(svg).unwrap();
         assert!(png.len() > 8);
-        // PNG magic number.
         assert_eq!(&png[0..8], &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
     }
 
