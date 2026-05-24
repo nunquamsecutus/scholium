@@ -180,33 +180,60 @@ export function paragraphContext(range: Range, container: HTMLElement, max = 100
   return (container.textContent ?? "").slice(0, max);
 }
 
+const BLOCK_TAGS = new Set(["P", "LI", "BLOCKQUOTE", "H1", "H2", "H3", "H4", "H5", "H6"]);
+
+function blockAncestor(node: Node, container: HTMLElement): HTMLElement | null {
+  let n: Node | null = node;
+  while (n && n !== container) {
+    if (n.nodeType === Node.ELEMENT_NODE && BLOCK_TAGS.has((n as HTMLElement).tagName)) {
+      return n as HTMLElement;
+    }
+    n = n.parentNode;
+  }
+  return null;
+}
+
 // Returns the 1-based occurrence index of `word` (word-bounded) covering the
-// start of `range` within `container`, walking text nodes individually so
-// element boundaries are treated as word boundaries (matching the backend's
-// line-based scan of the markdown source). Returns -1 if not found.
+// start of `range` within `container`. Text nodes inside the same block-level
+// ancestor are concatenated into one searchable corpus (so a phrase that
+// crosses inline formatting like `<strong>` is still findable); a "\n"
+// separator is inserted between text from different blocks so cross-paragraph
+// matches don't bleed and word boundaries are preserved. Returns -1 if not
+// found.
 export function occurrenceIndex(range: Range, container: HTMLElement, word: string): number {
-  let count = 0;
   const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+  let corpus = "";
+  let targetOffset = -1;
+  let lastBlock: HTMLElement | null = null;
   let node = walker.nextNode();
   while (node) {
-    const text = node.textContent ?? "";
-    const isTarget = node === range.startContainer;
-    let i = 0;
-    while (i <= text.length - word.length) {
-      if (text.substring(i, i + word.length) === word) {
-        const before = i === 0 ? "" : text[i - 1];
-        const after = i + word.length >= text.length ? "" : text[i + word.length];
-        if (!isWordChar(before) && !isWordChar(after)) {
-          count++;
-          if (isTarget && i <= range.startOffset && range.startOffset <= i + word.length) {
-            return count;
-          }
+    const block = blockAncestor(node, container);
+    if (lastBlock !== null && block !== lastBlock) {
+      corpus += "\n";
+    }
+    lastBlock = block;
+    if (node === range.startContainer) {
+      targetOffset = corpus.length + range.startOffset;
+    }
+    corpus += node.textContent ?? "";
+    node = walker.nextNode();
+  }
+  if (targetOffset < 0) return -1;
+
+  let count = 0;
+  let i = 0;
+  while (i <= corpus.length - word.length) {
+    if (corpus.substring(i, i + word.length) === word) {
+      const before = i === 0 ? "" : corpus[i - 1];
+      const after = i + word.length >= corpus.length ? "" : corpus[i + word.length];
+      if (!isWordChar(before) && !isWordChar(after)) {
+        count++;
+        if (i <= targetOffset && targetOffset <= i + word.length) {
+          return count;
         }
       }
-      i++;
     }
-    if (isTarget) return -1;
-    node = walker.nextNode();
+    i++;
   }
   return -1;
 }

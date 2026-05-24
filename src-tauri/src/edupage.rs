@@ -184,6 +184,31 @@ fn is_word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '\'' || c == '-'
 }
 
+/// Remove the inline markdown emphasis markers (`*`, `_`, `` ` ``, `~`) from a
+/// source line so that text matching can be done against text-as-rendered.
+/// Returns the stripped string and a byte map where `byte_map[i]` is the
+/// source byte position of stripped byte `i`, plus a sentinel at the end so
+/// `byte_map[stripped.len()] == line.len()`.
+fn strip_inline_markdown(line: &str) -> (String, Vec<usize>) {
+    let mut stripped = String::new();
+    let mut byte_map: Vec<usize> = Vec::with_capacity(line.len() + 1);
+    let mut src_byte = 0usize;
+    for ch in line.chars() {
+        let ch_len = ch.len_utf8();
+        if matches!(ch, '*' | '_' | '`' | '~') {
+            src_byte += ch_len;
+            continue;
+        }
+        for k in 0..ch_len {
+            byte_map.push(src_byte + k);
+        }
+        stripped.push(ch);
+        src_byte += ch_len;
+    }
+    byte_map.push(src_byte);
+    (stripped, byte_map)
+}
+
 pub fn create(file_id: &str, title: &str, description: Option<&str>, content: &str) -> String {
     let sha1 = sha1_hex(content);
     let ctime = chrono::Utc::now().to_rfc3339();
@@ -339,19 +364,24 @@ fn insert_anchor(
     }
     let mut count: u32 = 0;
     for (line_idx, line) in content.lines().enumerate() {
+        // Search against the line with inline markdown markers stripped so
+        // the rendered-text selection matches even when the source has
+        // `**bold**`, `_italic_`, etc. byte_map[i] gives the source position
+        // of stripped byte i (with a sentinel at the end).
+        let (stripped, byte_map) = strip_inline_markdown(line);
         let mut search_start = 0;
-        while let Some(rel_pos) = line[search_start..].find(query) {
+        while let Some(rel_pos) = stripped[search_start..].find(query) {
             let pos = search_start + rel_pos;
             let end = pos + query.len();
 
             let before_is_word = pos > 0
-                && line[..pos]
+                && stripped[..pos]
                     .chars()
                     .last()
                     .map(is_word_char)
                     .unwrap_or(false);
-            let after_is_word = end < line.len()
-                && line[end..]
+            let after_is_word = end < stripped.len()
+                && stripped[end..]
                     .chars()
                     .next()
                     .map(is_word_char)
@@ -360,7 +390,9 @@ fn insert_anchor(
             if !before_is_word && !after_is_word {
                 count += 1;
                 if count == target_n {
-                    let new_line = format!("{}{}{}", &line[..end], anchor, &line[end..]);
+                    let src_end = byte_map[end];
+                    let new_line =
+                        format!("{}{}{}", &line[..src_end], anchor, &line[src_end..]);
                     return Ok((line_idx, new_line));
                 }
             }
@@ -472,19 +504,20 @@ fn replace_in_line(
     }
     let mut count: u32 = 0;
     for (line_idx, line) in content.lines().enumerate() {
+        let (stripped, byte_map) = strip_inline_markdown(line);
         let mut search_start = 0;
-        while let Some(rel_pos) = line[search_start..].find(selection) {
+        while let Some(rel_pos) = stripped[search_start..].find(selection) {
             let pos = search_start + rel_pos;
             let end = pos + selection.len();
 
             let before_is_word = pos > 0
-                && line[..pos]
+                && stripped[..pos]
                     .chars()
                     .last()
                     .map(is_word_char)
                     .unwrap_or(false);
-            let after_is_word = end < line.len()
-                && line[end..]
+            let after_is_word = end < stripped.len()
+                && stripped[end..]
                     .chars()
                     .next()
                     .map(is_word_char)
@@ -493,8 +526,14 @@ fn replace_in_line(
             if !before_is_word && !after_is_word {
                 count += 1;
                 if count == target_n {
-                    let new_line =
-                        format!("{}{}{}", &line[..pos], replacement, &line[end..]);
+                    let src_pos = byte_map[pos];
+                    let src_end = byte_map[end];
+                    let new_line = format!(
+                        "{}{}{}",
+                        &line[..src_pos],
+                        replacement,
+                        &line[src_end..]
+                    );
                     return Ok((line_idx, new_line));
                 }
             }
@@ -846,18 +885,20 @@ pub fn regenerate_artifact(
 }
 
 /// Return the 0-indexed line containing the `target_n`-th word-bounded
-/// occurrence of `query`.
+/// occurrence of `query`. Matches against inline-markdown-stripped lines so
+/// selections of formatted text find their source line.
 fn line_of_occurrence(content: &str, query: &str, target_n: u32) -> Result<usize, String> {
     let mut count: u32 = 0;
     for (line_idx, line) in content.lines().enumerate() {
+        let (stripped, _byte_map) = strip_inline_markdown(line);
         let mut search_start = 0;
-        while let Some(rel_pos) = line[search_start..].find(query) {
+        while let Some(rel_pos) = stripped[search_start..].find(query) {
             let pos = search_start + rel_pos;
             let end = pos + query.len();
             let before_is_word = pos > 0
-                && line[..pos].chars().last().map(is_word_char).unwrap_or(false);
-            let after_is_word = end < line.len()
-                && line[end..].chars().next().map(is_word_char).unwrap_or(false);
+                && stripped[..pos].chars().last().map(is_word_char).unwrap_or(false);
+            let after_is_word = end < stripped.len()
+                && stripped[end..].chars().next().map(is_word_char).unwrap_or(false);
             if !before_is_word && !after_is_word {
                 count += 1;
                 if count == target_n {
@@ -1190,6 +1231,39 @@ mod tests {
         let raw = create("ch-01", "Chapter", None, "One blackhole only.");
         let result = add_note(&raw, NoteType::Definition, "blackhole", 2, "Body");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn add_note_finds_target_across_bold_markers() {
+        // Source has `**important** fact`; the user's rendered selection
+        // is the plain "important fact". The anchor should land right after
+        // the closing `**`.
+        let raw = create("ch-01", "Chapter", None, "An **important** fact about science.");
+        let (new_raw, _) =
+            add_note(&raw, NoteType::Definition, "important fact", 1, "Body").unwrap();
+        let content = reconstruct(&new_raw).unwrap();
+        assert_eq!(
+            content,
+            "An **important** fact[^*1] about science."
+        );
+    }
+
+    #[test]
+    fn add_note_finds_target_inside_italic_markers() {
+        let raw = create("ch-01", "Chapter", None, "The _energy_ flows through cells.");
+        let (new_raw, _) =
+            add_note(&raw, NoteType::Definition, "energy", 1, "Body").unwrap();
+        let content = reconstruct(&new_raw).unwrap();
+        assert_eq!(content, "The _energy_[^*1] flows through cells.");
+    }
+
+    #[test]
+    fn add_note_finds_target_with_inline_code() {
+        let raw = create("ch-01", "Chapter", None, "Call `printf` to print.");
+        let (new_raw, _) =
+            add_note(&raw, NoteType::Definition, "printf", 1, "Body").unwrap();
+        let content = reconstruct(&new_raw).unwrap();
+        assert_eq!(content, "Call `printf`[^*1] to print.");
     }
 
     #[test]

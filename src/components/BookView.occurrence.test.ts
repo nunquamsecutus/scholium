@@ -79,6 +79,25 @@ describe("occurrenceIndex", () => {
     expect(paragraphContext(range, c, 100).length).toBe(100);
   });
 
+  it("finds a phrase that spans inline formatting", () => {
+    const c = mountText("<p>The <strong>important fact</strong> matters.</p>");
+    // Range starts at "The " text node, offset 4 (the space before strong).
+    const firstText = c.querySelector("p")!.firstChild! as Text;
+    const range = document.createRange();
+    range.setStart(firstText, 4);
+    range.setEnd(firstText, 4);
+    expect(occurrenceIndex(range, c, "important fact")).toBe(1);
+  });
+
+  it("finds a phrase that starts in plain text and ends inside inline formatting", () => {
+    const c = mountText("<p>The important <em>fact</em> matters.</p>");
+    const firstText = c.querySelector("p")!.firstChild! as Text;
+    const range = document.createRange();
+    range.setStart(firstText, 4);
+    range.setEnd(firstText, 4);
+    expect(occurrenceIndex(range, c, "important fact")).toBe(1);
+  });
+
   it("counts occurrences across element boundaries", () => {
     const c = mountText("<p>first blackhole</p><p>second blackhole</p>");
     // textContent is "first blacksecond blackhole" — wait, no, textContent
