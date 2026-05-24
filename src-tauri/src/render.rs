@@ -294,9 +294,6 @@ pub fn render_chapter_html(
     // emitted and need to close.
     let mut open_block_tag: Option<&'static str> = None;
 
-    // List state: track ordered vs unordered.
-    let mut list_ordered = false;
-
     // We emit opening block tags *after* we know the block's source range, so
     // we buffer just the opening tag string.
     let mut pending_block_open: Option<String> = None;
@@ -332,14 +329,8 @@ pub fn render_chapter_html(
             Event::End(TagEnd::BlockQuote(_)) => {
                 out.push_str("</blockquote>");
             }
-            Event::Start(Tag::List(Some(_))) => {
-                list_ordered = true;
-                out.push_str("<ol>");
-            }
-            Event::Start(Tag::List(None)) => {
-                list_ordered = false;
-                out.push_str("<ul>");
-            }
+            Event::Start(Tag::List(Some(_))) => out.push_str("<ol>"),
+            Event::Start(Tag::List(None)) => out.push_str("<ul>"),
             Event::End(TagEnd::List(true)) => out.push_str("</ol>"),
             Event::End(TagEnd::List(false)) => out.push_str("</ul>"),
             Event::Start(Tag::Item) => {

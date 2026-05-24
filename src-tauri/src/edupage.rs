@@ -192,35 +192,6 @@ fn parse_delimiter(line: &str) -> Option<(String, String)> {
         .map(|(a, b)| (a.trim().to_string(), b.trim().to_string()))
 }
 
-fn is_word_char(c: char) -> bool {
-    c.is_alphanumeric() || c == '\'' || c == '-'
-}
-
-/// Remove the inline markdown emphasis markers (`*`, `_`, `` ` ``, `~`) from a
-/// source line so that text matching can be done against text-as-rendered.
-/// Returns the stripped string and a byte map where `byte_map[i]` is the
-/// source byte position of stripped byte `i`, plus a sentinel at the end so
-/// `byte_map[stripped.len()] == line.len()`.
-fn strip_inline_markdown(line: &str) -> (String, Vec<usize>) {
-    let mut stripped = String::new();
-    let mut byte_map: Vec<usize> = Vec::with_capacity(line.len() + 1);
-    let mut src_byte = 0usize;
-    for ch in line.chars() {
-        let ch_len = ch.len_utf8();
-        if matches!(ch, '*' | '_' | '`' | '~') {
-            src_byte += ch_len;
-            continue;
-        }
-        for k in 0..ch_len {
-            byte_map.push(src_byte + k);
-        }
-        stripped.push(ch);
-        src_byte += ch_len;
-    }
-    byte_map.push(src_byte);
-    (stripped, byte_map)
-}
-
 pub fn create(file_id: &str, title: &str, description: Option<&str>, content: &str) -> String {
     let sha1 = sha1_hex(content);
     let ctime = chrono::Utc::now().to_rfc3339();
@@ -360,261 +331,11 @@ pub fn read(raw: &str) -> Result<EduPage, String> {
     })
 }
 
-/// Insert `anchor` after the `target_n`-th word-bounded occurrence of
-/// `query` in `content`. `query` may be a single word or a multi-word phrase
-/// — word-boundary checks apply to the character immediately preceding and
-/// following the match. Returns the 0-indexed line number that changed and
-/// the new line text.
-fn insert_anchor(
-    content: &str,
-    query: &str,
-    target_n: u32,
-    anchor: &str,
-) -> Result<(usize, String), String> {
-    if target_n == 0 {
-        return Err("occurrence index must be 1 or greater".to_string());
-    }
-    let mut count: u32 = 0;
-    for (line_idx, line) in content.lines().enumerate() {
-        // Search against the line with inline markdown markers stripped so
-        // the rendered-text selection matches even when the source has
-        // `**bold**`, `_italic_`, etc. byte_map[i] gives the source position
-        // of stripped byte i (with a sentinel at the end).
-        let (stripped, byte_map) = strip_inline_markdown(line);
-        let mut search_start = 0;
-        while let Some(rel_pos) = stripped[search_start..].find(query) {
-            let pos = search_start + rel_pos;
-            let end = pos + query.len();
-
-            let before_is_word = pos > 0
-                && stripped[..pos]
-                    .chars()
-                    .last()
-                    .map(is_word_char)
-                    .unwrap_or(false);
-            let after_is_word = end < stripped.len()
-                && stripped[end..]
-                    .chars()
-                    .next()
-                    .map(is_word_char)
-                    .unwrap_or(false);
-
-            if !before_is_word && !after_is_word {
-                count += 1;
-                if count == target_n {
-                    let src_end = byte_map[end];
-                    let new_line =
-                        format!("{}{}{}", &line[..src_end], anchor, &line[src_end..]);
-                    return Ok((line_idx, new_line));
-                }
-            }
-
-            search_start = pos + 1;
-        }
-    }
-    Err(format!(
-        "could not find occurrence {} of '{}'",
-        target_n, query
-    ))
-}
-
-/// Append a note to the edupage: assigns the next id, inserts the
-/// `[^*<id>]` anchor at the requested occurrence as an EDIT revision, and
-/// stores the body content in a new NOTE block.
-pub fn add_note(
-    raw: &str,
-    note_type: NoteType,
-    word: &str,
-    occurrence_index: u32,
-    note_body: &str,
-) -> Result<(String, NoteMeta), String> {
-    let (mut header, _blocks) = parse_blocks(raw)?;
-
-    // Belt and braces: respect both the counter and any existing ids in case
-    // a file was hand-edited or comes from an older format without the counter.
-    let next_id = header
-        .next_note_id
-        .max(header.notes.iter().map(|n| n.id).max().unwrap_or(0) + 1);
-    header.next_note_id = next_id + 1;
-    let now = chrono::Utc::now().to_rfc3339();
-
-    // Reconstruct current markdown content so we can locate the target.
-    let content = reconstruct(raw)?;
-    let anchor = anchor_text(&note_type, next_id);
-    let (line_idx, new_line) = insert_anchor(&content, word, occurrence_index, &anchor)?;
-    let line_number = line_idx + 1; // 1-indexed for RevisionMeta
-
-    let new_sha1 = sha1_hex(&new_line);
-    let file_id = header.id.clone();
-
-    let new_revision = RevisionMeta {
-        id: new_sha1.clone(),
-        ctime: now.clone(),
-        action_id: uuid::Uuid::new_v4().to_string(),
-        revision_type: RevisionType::Edit,
-        line_start: line_number,
-        line_end: Some(line_number),
-    };
-
-    let new_note = NoteMeta {
-        id: next_id,
-        note_type,
-        word: word.to_string(),
-        ctime: now,
-    };
-
-    header.revisions.push(new_revision);
-    header.notes.push(new_note.clone());
-
-    let header_json = serde_json::to_string_pretty(&header).expect("header serialization");
-
-    // Body of the file = everything from the first delimiter onward, untouched.
-    let lines: Vec<&str> = raw.lines().collect();
-    let body_start = lines
-        .iter()
-        .position(|l| parse_delimiter(l).is_some())
-        .ok_or("no delimiter in edupage")?;
-    let existing_body = lines[body_start..].join("\n");
-
-    let mut new_file = header_json;
-    new_file.push('\n');
-    new_file.push_str(&existing_body);
-    new_file.push('\n');
-    new_file.push_str(&delimiter(&file_id, &new_sha1));
-    new_file.push('\n');
-    new_file.push_str(&new_line);
-    new_file.push('\n');
-    new_file.push_str(&note_delimiter(&file_id, next_id));
-    new_file.push('\n');
-    new_file.push_str(note_body);
-
-    Ok((new_file, new_note))
-}
-
 fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
-}
-
-/// Replace the `target_n`-th word-bounded occurrence of `selection` on a
-/// single source line with `replacement`. Errors if the selection contains
-/// a newline (multi-line rewrites aren't supported yet). Returns the
-/// 0-indexed line that changed and its new text.
-fn replace_in_line(
-    content: &str,
-    selection: &str,
-    target_n: u32,
-    replacement: &str,
-) -> Result<(usize, String), String> {
-    if selection.contains('\n') {
-        return Err("multi-line selections aren't supported for rewrite yet".to_string());
-    }
-    if target_n == 0 {
-        return Err("occurrence index must be 1 or greater".to_string());
-    }
-    let mut count: u32 = 0;
-    for (line_idx, line) in content.lines().enumerate() {
-        let (stripped, byte_map) = strip_inline_markdown(line);
-        let mut search_start = 0;
-        while let Some(rel_pos) = stripped[search_start..].find(selection) {
-            let pos = search_start + rel_pos;
-            let end = pos + selection.len();
-
-            let before_is_word = pos > 0
-                && stripped[..pos]
-                    .chars()
-                    .last()
-                    .map(is_word_char)
-                    .unwrap_or(false);
-            let after_is_word = end < stripped.len()
-                && stripped[end..]
-                    .chars()
-                    .next()
-                    .map(is_word_char)
-                    .unwrap_or(false);
-
-            if !before_is_word && !after_is_word {
-                count += 1;
-                if count == target_n {
-                    let src_pos = byte_map[pos];
-                    let src_end = byte_map[end];
-                    let new_line = format!(
-                        "{}{}{}",
-                        &line[..src_pos],
-                        replacement,
-                        &line[src_end..]
-                    );
-                    return Ok((line_idx, new_line));
-                }
-            }
-
-            search_start = pos + 1;
-        }
-    }
-    Err(format!(
-        "could not find occurrence {} of '{}'",
-        target_n, selection
-    ))
-}
-
-/// Rewrite the Nth occurrence of `selection` to `replacement`, wrapping
-/// the replacement in `<span data-rewrite-id="N">…</span>` so the renderer
-/// (and selection-touches-rewrite detection) can recognize it later.
-/// Records the change as a single-line EDIT revision and increments the
-/// next_rewrite_id counter. Returns the new file content and the assigned
-/// rewrite id.
-pub fn rewrite_passage(
-    raw: &str,
-    selection: &str,
-    occurrence_index: u32,
-    replacement: &str,
-) -> Result<(String, u32), String> {
-    let (mut header, _) = parse_blocks(raw)?;
-    let rewrite_id = header.next_rewrite_id;
-    header.next_rewrite_id = rewrite_id + 1;
-    let now = chrono::Utc::now().to_rfc3339();
-
-    let content = reconstruct(raw)?;
-    let span_text = format!(
-        r#"<span data-rewrite-id="{}">{}</span>"#,
-        rewrite_id,
-        html_escape(replacement),
-    );
-    let (line_idx, new_line) =
-        replace_in_line(&content, selection, occurrence_index, &span_text)?;
-    let line_number = line_idx + 1;
-
-    let new_sha1 = sha1_hex(&new_line);
-    let file_id = header.id.clone();
-
-    header.revisions.push(RevisionMeta {
-        id: new_sha1.clone(),
-        ctime: now,
-        action_id: uuid::Uuid::new_v4().to_string(),
-        revision_type: RevisionType::Edit,
-        line_start: line_number,
-        line_end: Some(line_number),
-    });
-
-    let header_json = serde_json::to_string_pretty(&header).expect("header serialization");
-    let lines: Vec<&str> = raw.lines().collect();
-    let body_start = lines
-        .iter()
-        .position(|l| parse_delimiter(l).is_some())
-        .ok_or("no delimiter in edupage")?;
-    let existing_body = lines[body_start..].join("\n");
-
-    let mut new_file = header_json;
-    new_file.push('\n');
-    new_file.push_str(&existing_body);
-    new_file.push('\n');
-    new_file.push_str(&delimiter(&file_id, &new_sha1));
-    new_file.push('\n');
-    new_file.push_str(&new_line);
-
-    Ok((new_file, rewrite_id))
 }
 
 /// Replace the entire `<span data-rewrite-id="<rewrite_id>">…</span>` with a
@@ -896,36 +617,6 @@ pub fn regenerate_artifact(
     Ok((new_file, updated))
 }
 
-/// Return the 0-indexed line containing the `target_n`-th word-bounded
-/// occurrence of `query`. Matches against inline-markdown-stripped lines so
-/// selections of formatted text find their source line.
-fn line_of_occurrence(content: &str, query: &str, target_n: u32) -> Result<usize, String> {
-    let mut count: u32 = 0;
-    for (line_idx, line) in content.lines().enumerate() {
-        let (stripped, _byte_map) = strip_inline_markdown(line);
-        let mut search_start = 0;
-        while let Some(rel_pos) = stripped[search_start..].find(query) {
-            let pos = search_start + rel_pos;
-            let end = pos + query.len();
-            let before_is_word = pos > 0
-                && stripped[..pos].chars().last().map(is_word_char).unwrap_or(false);
-            let after_is_word = end < stripped.len()
-                && stripped[end..].chars().next().map(is_word_char).unwrap_or(false);
-            if !before_is_word && !after_is_word {
-                count += 1;
-                if count == target_n {
-                    return Ok(line_idx);
-                }
-            }
-            search_start = pos + 1;
-        }
-    }
-    Err(format!(
-        "could not find occurrence {} of '{}'",
-        target_n, query
-    ))
-}
-
 /// Strip characters that would break markdown image alt text / link syntax.
 fn sanitize_alt(s: &str) -> String {
     s.chars()
@@ -933,139 +624,6 @@ fn sanitize_alt(s: &str) -> String {
         .collect::<String>()
         .trim()
         .to_string()
-}
-
-/// Add an SVG artifact: store the SVG in an ARTIFACT block, record metadata
-/// in the header, and place a markdown image (`![alt](epar://<id>)`) near the
-/// Nth occurrence of `selection`. Wide images (aspect_ratio >= 1) go on their
-/// own paragraph after the source line; tall images go inline right after the
-/// selection so the renderer can float them beside the text. Recorded as a
-/// single EDIT revision (which may expand one source line into several).
-pub fn add_artifact(
-    raw: &str,
-    selection: &str,
-    occurrence_index: u32,
-    svg: &str,
-    caption: &str,
-    aspect_ratio: f32,
-    semantic_type: &str,
-) -> Result<(String, ArtifactMeta), String> {
-    let (mut header, _) = parse_blocks(raw)?;
-    let artifact_id = header.next_artifact_id;
-    header.next_artifact_id = artifact_id + 1;
-    let now = chrono::Utc::now().to_rfc3339();
-
-    let content = reconstruct(raw)?;
-    let alt = sanitize_alt(caption);
-    let image_md = format!("![{}](epar://{})", alt, artifact_id);
-
-    let (line_idx, new_block) = if aspect_ratio >= 1.0 {
-        // Wide: a block image on its own paragraph after the source line.
-        let idx = line_of_occurrence(&content, selection, occurrence_index)?;
-        let line = content.lines().nth(idx).unwrap_or("");
-        (idx, format!("{}\n\n{}", line, image_md))
-    } else {
-        // Tall: inline right after the selection, so it can float beside text.
-        insert_anchor(&content, selection, occurrence_index, &format!(" {}", image_md))?
-    };
-    let line_number = line_idx + 1;
-
-    let new_sha1 = sha1_hex(&new_block);
-    let file_id = header.id.clone();
-
-    header.revisions.push(RevisionMeta {
-        id: new_sha1.clone(),
-        ctime: now.clone(),
-        action_id: uuid::Uuid::new_v4().to_string(),
-        revision_type: RevisionType::Edit,
-        line_start: line_number,
-        line_end: Some(line_number),
-    });
-
-    let artifact = ArtifactMeta {
-        id: artifact_id,
-        mime_type: "image/svg+xml".to_string(),
-        semantic_type: semantic_type.to_string(),
-        ctime: now,
-        caption: if caption.trim().is_empty() {
-            None
-        } else {
-            Some(caption.trim().to_string())
-        },
-        aspect_ratio,
-        source: selection.to_string(),
-    };
-    header.artifacts.push(artifact.clone());
-
-    let header_json = serde_json::to_string_pretty(&header).expect("header serialization");
-    let lines: Vec<&str> = raw.lines().collect();
-    let body_start = lines
-        .iter()
-        .position(|l| parse_delimiter(l).is_some())
-        .ok_or("no delimiter in edupage")?;
-    let existing_body = lines[body_start..].join("\n");
-
-    let mut new_file = header_json;
-    new_file.push('\n');
-    new_file.push_str(&existing_body);
-    new_file.push('\n');
-    new_file.push_str(&delimiter(&file_id, &new_sha1));
-    new_file.push('\n');
-    new_file.push_str(&new_block);
-    new_file.push('\n');
-    new_file.push_str(&artifact_delimiter(&file_id, artifact_id));
-    new_file.push('\n');
-    new_file.push_str(svg);
-
-    Ok((new_file, artifact))
-}
-
-/// Insert a `[^A<appendix_seq>]` cross-reference marker after the Nth
-/// occurrence of `selection` in the body, recorded as an EDIT revision.
-/// Unlike notes, the appendix link points to another chapter and has no
-/// metadata stored in this file's header — the link target is the manifest
-/// entry whose id is `ap-<seq>`.
-pub fn insert_appendix_ref(
-    raw: &str,
-    appendix_seq: u32,
-    selection: &str,
-    occurrence_index: u32,
-) -> Result<String, String> {
-    let (mut header, _) = parse_blocks(raw)?;
-    let now = chrono::Utc::now().to_rfc3339();
-    let content = reconstruct(raw)?;
-    let anchor = format!("[^A{}]", appendix_seq);
-    let (line_idx, new_line) = insert_anchor(&content, selection, occurrence_index, &anchor)?;
-    let line_number = line_idx + 1;
-    let new_sha1 = sha1_hex(&new_line);
-    let file_id = header.id.clone();
-
-    header.revisions.push(RevisionMeta {
-        id: new_sha1.clone(),
-        ctime: now,
-        action_id: uuid::Uuid::new_v4().to_string(),
-        revision_type: RevisionType::Edit,
-        line_start: line_number,
-        line_end: Some(line_number),
-    });
-
-    let header_json = serde_json::to_string_pretty(&header).expect("header serialization");
-    let lines: Vec<&str> = raw.lines().collect();
-    let body_start = lines
-        .iter()
-        .position(|l| parse_delimiter(l).is_some())
-        .ok_or("no delimiter in edupage")?;
-    let existing_body = lines[body_start..].join("\n");
-
-    let mut new_file = header_json;
-    new_file.push('\n');
-    new_file.push_str(&existing_body);
-    new_file.push('\n');
-    new_file.push_str(&delimiter(&file_id, &new_sha1));
-    new_file.push('\n');
-    new_file.push_str(&new_line);
-
-    Ok(new_file)
 }
 
 /// Remove a note: drops the metadata, strips the NOTE block, and appends a
@@ -1517,6 +1075,325 @@ pub fn insert_appendix_ref_at(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Test-only setup helpers ───────────────────────────────────────────────
+    // These are the occurrence-based versions of the production functions that
+    // were replaced by exact-byte-position `_at` variants.  They live here
+    // because several tests for live functions (delete_artifact,
+    // regenerate_artifact, delete_note, rewrite_existing_span) use them as
+    // convenient setup helpers.
+
+    fn is_word_char(c: char) -> bool {
+        c.is_alphanumeric() || c == '\'' || c == '-'
+    }
+
+    fn strip_inline_markdown(line: &str) -> (String, Vec<usize>) {
+        let mut stripped = String::new();
+        let mut byte_map: Vec<usize> = Vec::with_capacity(line.len() + 1);
+        let mut src_byte = 0usize;
+        for ch in line.chars() {
+            let ch_len = ch.len_utf8();
+            if matches!(ch, '*' | '_' | '`' | '~') {
+                src_byte += ch_len;
+                continue;
+            }
+            for k in 0..ch_len {
+                byte_map.push(src_byte + k);
+            }
+            stripped.push(ch);
+            src_byte += ch_len;
+        }
+        byte_map.push(src_byte);
+        (stripped, byte_map)
+    }
+
+    fn insert_anchor(
+        content: &str,
+        query: &str,
+        target_n: u32,
+        anchor: &str,
+    ) -> Result<(usize, String), String> {
+        if target_n == 0 {
+            return Err("occurrence index must be 1 or greater".to_string());
+        }
+        let mut count: u32 = 0;
+        for (line_idx, line) in content.lines().enumerate() {
+            let (stripped, byte_map) = strip_inline_markdown(line);
+            let mut search_start = 0;
+            while let Some(rel_pos) = stripped[search_start..].find(query) {
+                let pos = search_start + rel_pos;
+                let end = pos + query.len();
+                let before_is_word = pos > 0
+                    && stripped[..pos].chars().last().map(is_word_char).unwrap_or(false);
+                let after_is_word = end < stripped.len()
+                    && stripped[end..].chars().next().map(is_word_char).unwrap_or(false);
+                if !before_is_word && !after_is_word {
+                    count += 1;
+                    if count == target_n {
+                        let src_end = byte_map[end];
+                        let new_line = format!("{}{}{}", &line[..src_end], anchor, &line[src_end..]);
+                        return Ok((line_idx, new_line));
+                    }
+                }
+                search_start = pos + 1;
+            }
+        }
+        Err(format!("could not find occurrence {} of '{}'", target_n, query))
+    }
+
+    fn add_note(
+        raw: &str,
+        note_type: NoteType,
+        word: &str,
+        occurrence_index: u32,
+        note_body: &str,
+    ) -> Result<(String, NoteMeta), String> {
+        let (mut header, _blocks) = parse_blocks(raw)?;
+        let next_id = header
+            .next_note_id
+            .max(header.notes.iter().map(|n| n.id).max().unwrap_or(0) + 1);
+        header.next_note_id = next_id + 1;
+        let now = chrono::Utc::now().to_rfc3339();
+        let content = reconstruct(raw)?;
+        let anchor = anchor_text(&note_type, next_id);
+        let (line_idx, new_line) = insert_anchor(&content, word, occurrence_index, &anchor)?;
+        let line_number = line_idx + 1;
+        let new_sha1 = sha1_hex(&new_line);
+        let file_id = header.id.clone();
+        let new_note = NoteMeta { id: next_id, note_type, word: word.to_string(), ctime: now.clone() };
+        header.revisions.push(RevisionMeta {
+            id: new_sha1.clone(),
+            ctime: now,
+            action_id: uuid::Uuid::new_v4().to_string(),
+            revision_type: RevisionType::Edit,
+            line_start: line_number,
+            line_end: Some(line_number),
+        });
+        header.notes.push(new_note.clone());
+        let header_json = serde_json::to_string_pretty(&header).expect("header serialization");
+        let lines: Vec<&str> = raw.lines().collect();
+        let body_start = lines.iter().position(|l| parse_delimiter(l).is_some()).ok_or("no delimiter")?;
+        let existing_body = lines[body_start..].join("\n");
+        let mut new_file = header_json;
+        new_file.push('\n');
+        new_file.push_str(&existing_body);
+        new_file.push('\n');
+        new_file.push_str(&delimiter(&file_id, &new_sha1));
+        new_file.push('\n');
+        new_file.push_str(&new_line);
+        new_file.push('\n');
+        new_file.push_str(&note_delimiter(&file_id, next_id));
+        new_file.push('\n');
+        new_file.push_str(note_body);
+        Ok((new_file, new_note))
+    }
+
+    fn replace_in_line(
+        content: &str,
+        selection: &str,
+        target_n: u32,
+        replacement: &str,
+    ) -> Result<(usize, String), String> {
+        if selection.contains('\n') {
+            return Err("multi-line selections aren't supported".to_string());
+        }
+        if target_n == 0 {
+            return Err("occurrence index must be 1 or greater".to_string());
+        }
+        let mut count: u32 = 0;
+        for (line_idx, line) in content.lines().enumerate() {
+            let (stripped, byte_map) = strip_inline_markdown(line);
+            let mut search_start = 0;
+            while let Some(rel_pos) = stripped[search_start..].find(selection) {
+                let pos = search_start + rel_pos;
+                let end = pos + selection.len();
+                let before_is_word = pos > 0
+                    && stripped[..pos].chars().last().map(is_word_char).unwrap_or(false);
+                let after_is_word = end < stripped.len()
+                    && stripped[end..].chars().next().map(is_word_char).unwrap_or(false);
+                if !before_is_word && !after_is_word {
+                    count += 1;
+                    if count == target_n {
+                        let src_pos = byte_map[pos];
+                        let src_end = byte_map[end];
+                        return Ok((line_idx, format!("{}{}{}", &line[..src_pos], replacement, &line[src_end..])));
+                    }
+                }
+                search_start = pos + 1;
+            }
+        }
+        Err(format!("could not find occurrence {} of '{}'", target_n, selection))
+    }
+
+    fn rewrite_passage(
+        raw: &str,
+        selection: &str,
+        occurrence_index: u32,
+        replacement: &str,
+    ) -> Result<(String, u32), String> {
+        let (mut header, _) = parse_blocks(raw)?;
+        let rewrite_id = header.next_rewrite_id;
+        header.next_rewrite_id = rewrite_id + 1;
+        let now = chrono::Utc::now().to_rfc3339();
+        let content = reconstruct(raw)?;
+        let span_text = format!(r#"<span data-rewrite-id="{}">{}</span>"#, rewrite_id, html_escape(replacement));
+        let (line_idx, new_line) = replace_in_line(&content, selection, occurrence_index, &span_text)?;
+        let line_number = line_idx + 1;
+        let new_sha1 = sha1_hex(&new_line);
+        let file_id = header.id.clone();
+        header.revisions.push(RevisionMeta {
+            id: new_sha1.clone(),
+            ctime: now,
+            action_id: uuid::Uuid::new_v4().to_string(),
+            revision_type: RevisionType::Edit,
+            line_start: line_number,
+            line_end: Some(line_number),
+        });
+        let header_json = serde_json::to_string_pretty(&header).expect("header serialization");
+        let lines: Vec<&str> = raw.lines().collect();
+        let body_start = lines.iter().position(|l| parse_delimiter(l).is_some()).ok_or("no delimiter")?;
+        let existing_body = lines[body_start..].join("\n");
+        let mut new_file = header_json;
+        new_file.push('\n');
+        new_file.push_str(&existing_body);
+        new_file.push('\n');
+        new_file.push_str(&delimiter(&file_id, &new_sha1));
+        new_file.push('\n');
+        new_file.push_str(&new_line);
+        Ok((new_file, rewrite_id))
+    }
+
+    fn line_of_occurrence(content: &str, query: &str, target_n: u32) -> Result<usize, String> {
+        let mut count: u32 = 0;
+        for (line_idx, line) in content.lines().enumerate() {
+            let (stripped, _byte_map) = strip_inline_markdown(line);
+            let mut search_start = 0;
+            while let Some(rel_pos) = stripped[search_start..].find(query) {
+                let pos = search_start + rel_pos;
+                let end = pos + query.len();
+                let before_is_word = pos > 0
+                    && stripped[..pos].chars().last().map(is_word_char).unwrap_or(false);
+                let after_is_word = end < stripped.len()
+                    && stripped[end..].chars().next().map(is_word_char).unwrap_or(false);
+                if !before_is_word && !after_is_word {
+                    count += 1;
+                    if count == target_n {
+                        return Ok(line_idx);
+                    }
+                }
+                search_start = pos + 1;
+            }
+        }
+        Err(format!("could not find occurrence {} of '{}'", target_n, query))
+    }
+
+    fn sanitize_alt_local(s: &str) -> String {
+        s.chars()
+            .filter(|c| !matches!(c, '[' | ']' | '(' | ')' | '\n' | '\r'))
+            .collect::<String>()
+            .trim()
+            .to_string()
+    }
+
+    fn add_artifact(
+        raw: &str,
+        selection: &str,
+        occurrence_index: u32,
+        svg: &str,
+        caption: &str,
+        aspect_ratio: f32,
+        semantic_type: &str,
+    ) -> Result<(String, ArtifactMeta), String> {
+        let (mut header, _) = parse_blocks(raw)?;
+        let artifact_id = header.next_artifact_id;
+        header.next_artifact_id = artifact_id + 1;
+        let now = chrono::Utc::now().to_rfc3339();
+        let content = reconstruct(raw)?;
+        let alt = sanitize_alt_local(caption);
+        let image_md = format!("![{}](epar://{})", alt, artifact_id);
+        let (line_idx, new_block) = if aspect_ratio >= 1.0 {
+            let idx = line_of_occurrence(&content, selection, occurrence_index)?;
+            let line = content.lines().nth(idx).unwrap_or("");
+            (idx, format!("{}\n\n{}", line, image_md))
+        } else {
+            insert_anchor(&content, selection, occurrence_index, &format!(" {}", image_md))?
+        };
+        let line_number = line_idx + 1;
+        let new_sha1 = sha1_hex(&new_block);
+        let file_id = header.id.clone();
+        let artifact = ArtifactMeta {
+            id: artifact_id,
+            mime_type: "image/svg+xml".to_string(),
+            semantic_type: semantic_type.to_string(),
+            ctime: now.clone(),
+            caption: if caption.trim().is_empty() { None } else { Some(caption.trim().to_string()) },
+            aspect_ratio,
+            source: selection.to_string(),
+        };
+        header.revisions.push(RevisionMeta {
+            id: new_sha1.clone(),
+            ctime: now,
+            action_id: uuid::Uuid::new_v4().to_string(),
+            revision_type: RevisionType::Edit,
+            line_start: line_number,
+            line_end: Some(line_number),
+        });
+        header.artifacts.push(artifact.clone());
+        let header_json = serde_json::to_string_pretty(&header).expect("header serialization");
+        let lines: Vec<&str> = raw.lines().collect();
+        let body_start = lines.iter().position(|l| parse_delimiter(l).is_some()).ok_or("no delimiter")?;
+        let existing_body = lines[body_start..].join("\n");
+        let mut new_file = header_json;
+        new_file.push('\n');
+        new_file.push_str(&existing_body);
+        new_file.push('\n');
+        new_file.push_str(&delimiter(&file_id, &new_sha1));
+        new_file.push('\n');
+        new_file.push_str(&new_block);
+        new_file.push('\n');
+        new_file.push_str(&artifact_delimiter(&file_id, artifact_id));
+        new_file.push('\n');
+        new_file.push_str(svg);
+        Ok((new_file, artifact))
+    }
+
+    fn insert_appendix_ref(
+        raw: &str,
+        appendix_seq: u32,
+        selection: &str,
+        occurrence_index: u32,
+    ) -> Result<String, String> {
+        let (mut header, _) = parse_blocks(raw)?;
+        let now = chrono::Utc::now().to_rfc3339();
+        let content = reconstruct(raw)?;
+        let anchor = format!("[^A{}]", appendix_seq);
+        let (line_idx, new_line) = insert_anchor(&content, selection, occurrence_index, &anchor)?;
+        let line_number = line_idx + 1;
+        let new_sha1 = sha1_hex(&new_line);
+        let file_id = header.id.clone();
+        header.revisions.push(RevisionMeta {
+            id: new_sha1.clone(),
+            ctime: now,
+            action_id: uuid::Uuid::new_v4().to_string(),
+            revision_type: RevisionType::Edit,
+            line_start: line_number,
+            line_end: Some(line_number),
+        });
+        let header_json = serde_json::to_string_pretty(&header).expect("header serialization");
+        let lines: Vec<&str> = raw.lines().collect();
+        let body_start = lines.iter().position(|l| parse_delimiter(l).is_some()).ok_or("no delimiter")?;
+        let existing_body = lines[body_start..].join("\n");
+        let mut new_file = header_json;
+        new_file.push('\n');
+        new_file.push_str(&existing_body);
+        new_file.push('\n');
+        new_file.push_str(&delimiter(&file_id, &new_sha1));
+        new_file.push('\n');
+        new_file.push_str(&new_line);
+        Ok(new_file)
+    }
+
+    // ── Tests ─────────────────────────────────────────────────────────────────
 
     const SAMPLE_MD: &str = "# Chapter One\n\nHello world.\n\nSecond paragraph with blackhole here. Another blackhole follows.";
 
