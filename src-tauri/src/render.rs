@@ -195,17 +195,86 @@ fn title_case(s: &str) -> String {
     }
 }
 
+/// Sanitize an SVG string for safe inline rendering.
+///
+/// `ammonia`'s defaults cover common HTML elements but do **not** include SVG
+/// tags (`<svg>`, `<rect>`, `<path>`, …); without configuration every SVG tag
+/// is stripped and the figure renders empty.  This builder extends the default
+/// allowlist with the standard SVG element set and safe SVG attributes, while
+/// still blocking `<script>` tags and `on*` event-handler attributes.
+fn clean_svg(svg: &str) -> String {
+    let mut b = ammonia::Builder::new();
+    b.add_tags([
+        // structural
+        "svg", "g", "defs", "title", "desc", "symbol", "use",
+        // shapes
+        "path", "rect", "circle", "ellipse",
+        "line", "polyline", "polygon",
+        // text
+        "text", "tspan", "textPath",
+        // gradients / patterns / clipping
+        "linearGradient", "radialGradient", "stop",
+        "clipPath", "mask", "pattern", "marker",
+        // filters (allow the container; primitives below)
+        "filter",
+        "feBlend", "feColorMatrix", "feComponentTransfer",
+        "feComposite", "feFlood", "feGaussianBlur",
+        "feMerge", "feMergeNode", "feMorphology", "feOffset",
+        "feTile", "feTurbulence",
+        // images / animation
+        "image",
+        "animate", "animateTransform", "animateMotion",
+    ]);
+    b.add_generic_attributes([
+        "id", "class", "style",
+        // geometry
+        "x", "y", "width", "height",
+        "cx", "cy", "r", "rx", "ry",
+        "x1", "y1", "x2", "y2",
+        "points", "d",
+        "viewBox", "preserveAspectRatio",
+        // presentation
+        "fill", "fill-opacity", "fill-rule",
+        "stroke", "stroke-width", "stroke-linecap", "stroke-linejoin",
+        "stroke-dasharray", "stroke-dashoffset", "stroke-opacity", "stroke-miterlimit",
+        "opacity", "display", "visibility",
+        "transform",
+        "font-family", "font-size", "font-weight", "font-style",
+        "text-anchor", "dominant-baseline", "alignment-baseline",
+        "letter-spacing", "word-spacing",
+        // gradient / stop
+        "offset", "stop-color", "stop-opacity",
+        "gradientUnits", "gradientTransform", "spreadMethod",
+        "patternUnits", "patternTransform",
+        "fx", "fy",
+        // xmlns (on the root <svg>)
+        "xmlns",
+        // use / symbol links  (no javascript: — ammonia blocks unlisted schemes)
+        "href",
+        // marker geometry
+        "markerWidth", "markerHeight", "markerUnits", "orient", "refX", "refY",
+        // clip / mask references
+        "clip-path", "clip-rule",
+        // filter primitives
+        "in", "in2", "result", "type", "mode", "values",
+        "stdDeviation", "dx", "dy",
+    ]);
+    b.clean(svg).to_string()
+}
+
 /// Inline an artifact as a `<figure data-src-skip …>`.
 ///
 /// The figure carries `data-src-skip` because the image is not selectable body
-/// text.  The SVG body is sanitized with `ammonia` before inlining.
+/// text.  The SVG body is sanitized with `clean_svg` before inlining — this
+/// allows standard SVG elements while blocking `<script>` tags and `on*`
+/// event-handler attributes.
 fn figure_for(artifact: &ArtifactWithBody) -> String {
     let cls = if artifact.aspect_ratio >= 1.0 {
         "artifact artifact-block"
     } else {
         "artifact artifact-float"
     };
-    let safe_svg = ammonia::clean(&artifact.body);
+    let safe_svg = clean_svg(&artifact.body);
     let caption = artifact
         .caption
         .as_deref()
@@ -600,6 +669,53 @@ mod tests {
         assert!(html.contains("<h1"));
         assert!(html.contains("data-src-start="));
         assert!(html.contains("Title"));
+    }
+
+    // ── SVG sanitization ─────────────────────────────────────────────────────
+
+    #[test]
+    fn clean_svg_passes_through_standard_svg() {
+        let svg = r#"<svg viewBox="0 0 100 50"><rect width="100" height="50" fill="blue"/></svg>"#;
+        let out = clean_svg(svg);
+        assert!(out.contains("<svg"), "svg tag should survive: {out}");
+        assert!(out.contains("<rect"), "rect tag should survive: {out}");
+        assert!(out.contains("fill=\"blue\""), "fill attr should survive: {out}");
+    }
+
+    #[test]
+    fn clean_svg_strips_script_tags() {
+        let svg = r#"<svg><script>alert(1)</script><rect width="10" height="10"/></svg>"#;
+        let out = clean_svg(svg);
+        assert!(!out.contains("<script"), "script must be stripped: {out}");
+        assert!(out.contains("<rect"), "rect should survive: {out}");
+    }
+
+    #[test]
+    fn clean_svg_strips_event_handlers() {
+        let svg = r#"<svg><rect onclick="evil()" width="10" height="10"/></svg>"#;
+        let out = clean_svg(svg);
+        assert!(!out.contains("onclick"), "onclick must be stripped: {out}");
+        assert!(out.contains("<rect"), "rect should survive: {out}");
+    }
+
+    #[test]
+    fn artifact_figure_contains_svg() {
+        use crate::edupage::ArtifactWithBody;
+        let art = ArtifactWithBody {
+            id: 1,
+            mime_type: "image/svg+xml".into(),
+            semantic_type: "diagram".into(),
+            ctime: "2026-01-01T00:00:00Z".into(),
+            caption: Some("Test diagram".into()),
+            aspect_ratio: 1.5,
+            source: "the collapse".into(),
+            body: r#"<svg viewBox="0 0 100 50"><circle cx="50" cy="25" r="20" fill="red"/></svg>"#.into(),
+        };
+        let html = figure_for(&art);
+        assert!(html.contains("<svg"), "figure must contain <svg>: {html}");
+        assert!(html.contains("<circle"), "figure must contain <circle>: {html}");
+        assert!(html.contains("Test diagram"), "figure must contain caption: {html}");
+        assert!(html.contains("data-src-skip"), "figure must carry data-src-skip: {html}");
     }
 }
 
