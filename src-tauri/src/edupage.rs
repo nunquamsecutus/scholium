@@ -117,6 +117,18 @@ pub struct NoteWithBody {
     pub body: String,
 }
 
+impl NoteWithBody {
+    /// Return the note type as a lowercase string slice, matching the JSON
+    /// serialisation.  Used by the renderer to filter endnotes.
+    pub fn note_type_str(&self) -> &'static str {
+        match self.note_type {
+            NoteType::Definition => "definition",
+            NoteType::Footnote => "footnote",
+            NoteType::Endnote => "endnote",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ArtifactMeta {
@@ -1128,6 +1140,378 @@ pub fn delete_note(raw: &str, note_id: u32) -> Result<String, String> {
     new_file.push_str(&new_line);
 
     Ok(new_file)
+}
+
+// ── Byte-position operations ──────────────────────────────────────────────────
+//
+// These replace the text-search / occurrence-index approach used by the old
+// public API.  The Rust HTML renderer (`render.rs`) annotates every text span
+// with `data-src-start` / `data-src-end` UTF-8 byte offsets into the
+// reconstructed markdown.  The frontend extracts those offsets when the user
+// makes a selection and sends them here instead of (selection text,
+// occurrence_index).  No text searching is performed — operations are purely
+// positional.
+
+/// Return the 0-indexed line that contains `byte_pos` and that line's byte
+/// span within `content` as `(line_idx, line_start, line_end)` where
+/// `line_end` is the byte offset of the `\n` (or `content.len()` for the last
+/// line).
+fn locate_byte(content: &str, byte_pos: usize) -> Result<(usize, usize, usize), String> {
+    if byte_pos > content.len() {
+        return Err(format!(
+            "byte position {} exceeds source length {}",
+            byte_pos,
+            content.len()
+        ));
+    }
+    let mut line_idx = 0;
+    let mut line_start = 0;
+    for (i, c) in content.char_indices() {
+        if i >= byte_pos {
+            break;
+        }
+        if c == '\n' {
+            line_idx += 1;
+            line_start = i + 1;
+        }
+    }
+    let line_end = content[line_start..]
+        .find('\n')
+        .map(|r| line_start + r)
+        .unwrap_or(content.len());
+    Ok((line_idx, line_start, line_end))
+}
+
+/// Write back a modified single line as an EDIT revision, returning the new
+/// raw file content.  `header` must already have the new revision appended.
+fn commit_line_edit(
+    raw: &str,
+    header: &EdupageHeader,
+    file_id: &str,
+    new_sha1: &str,
+    new_line: &str,
+) -> Result<String, String> {
+    let header_json = serde_json::to_string_pretty(header).expect("header serialization");
+    let raw_lines: Vec<&str> = raw.lines().collect();
+    let body_start = raw_lines
+        .iter()
+        .position(|l| parse_delimiter(l).is_some())
+        .ok_or("no delimiter in edupage")?;
+    let existing_body = raw_lines[body_start..].join("\n");
+
+    let mut new_file = header_json;
+    new_file.push('\n');
+    new_file.push_str(&existing_body);
+    new_file.push('\n');
+    new_file.push_str(&delimiter(file_id, new_sha1));
+    new_file.push('\n');
+    new_file.push_str(new_line);
+    Ok(new_file)
+}
+
+/// Insert `text` at byte position `byte_pos` in the reconstructed markdown.
+/// Records the change as a single-line EDIT revision.
+pub fn insert_at(raw: &str, byte_pos: usize, text: &str) -> Result<String, String> {
+    let (mut header, _) = parse_blocks(raw)?;
+    let content = reconstruct(raw)?;
+    let now = chrono::Utc::now().to_rfc3339();
+
+    let (line_idx, line_start, line_end) = locate_byte(&content, byte_pos)?;
+    let offset_in_line = byte_pos - line_start;
+    let line = &content[line_start..line_end];
+
+    if !line.is_char_boundary(offset_in_line) {
+        return Err(format!(
+            "byte position {} is not on a UTF-8 character boundary",
+            byte_pos
+        ));
+    }
+
+    let new_line = format!("{}{}{}", &line[..offset_in_line], text, &line[offset_in_line..]);
+    let line_number = line_idx + 1;
+    let new_sha1 = sha1_hex(&new_line);
+    let file_id = header.id.clone();
+
+    header.revisions.push(RevisionMeta {
+        id: new_sha1.clone(),
+        ctime: now,
+        action_id: uuid::Uuid::new_v4().to_string(),
+        revision_type: RevisionType::Edit,
+        line_start: line_number,
+        line_end: Some(line_number),
+    });
+
+    commit_line_edit(raw, &header, &file_id, &new_sha1, &new_line)
+}
+
+/// Append a note using an exact byte position.
+///
+/// `word` is the plain-text selection (used for margin display).
+/// `src_end` is the byte offset in the reconstructed markdown after which the
+/// note anchor `[^<marker><id>]` is inserted.
+pub fn add_note_at(
+    raw: &str,
+    note_type: NoteType,
+    word: &str,
+    src_end: usize,
+    note_body: &str,
+) -> Result<(String, NoteMeta), String> {
+    let (mut header, _) = parse_blocks(raw)?;
+    let next_id = header
+        .next_note_id
+        .max(header.notes.iter().map(|n| n.id).max().unwrap_or(0) + 1);
+    header.next_note_id = next_id + 1;
+    let now = chrono::Utc::now().to_rfc3339();
+
+    let content = reconstruct(raw)?;
+    let anchor = anchor_text(&note_type, next_id);
+
+    let (line_idx, line_start, line_end) = locate_byte(&content, src_end)?;
+    let offset_in_line = src_end - line_start;
+    let line = &content[line_start..line_end];
+
+    if !line.is_char_boundary(offset_in_line) {
+        return Err(format!(
+            "byte position {} is not on a UTF-8 character boundary",
+            src_end
+        ));
+    }
+
+    let new_line = format!("{}{}{}", &line[..offset_in_line], anchor, &line[offset_in_line..]);
+    let line_number = line_idx + 1;
+    let new_sha1 = sha1_hex(&new_line);
+    let file_id = header.id.clone();
+
+    header.revisions.push(RevisionMeta {
+        id: new_sha1.clone(),
+        ctime: now.clone(),
+        action_id: uuid::Uuid::new_v4().to_string(),
+        revision_type: RevisionType::Edit,
+        line_start: line_number,
+        line_end: Some(line_number),
+    });
+
+    let new_note = NoteMeta {
+        id: next_id,
+        note_type,
+        word: word.to_string(),
+        ctime: now,
+    };
+    header.notes.push(new_note.clone());
+
+    let header_json = serde_json::to_string_pretty(&header).expect("header serialization");
+    let raw_lines: Vec<&str> = raw.lines().collect();
+    let body_start = raw_lines
+        .iter()
+        .position(|l| parse_delimiter(l).is_some())
+        .ok_or("no delimiter in edupage")?;
+    let existing_body = raw_lines[body_start..].join("\n");
+
+    let mut new_file = header_json;
+    new_file.push('\n');
+    new_file.push_str(&existing_body);
+    new_file.push('\n');
+    new_file.push_str(&delimiter(&file_id, &new_sha1));
+    new_file.push('\n');
+    new_file.push_str(&new_line);
+    new_file.push('\n');
+    new_file.push_str(&note_delimiter(&file_id, next_id));
+    new_file.push('\n');
+    new_file.push_str(note_body);
+
+    Ok((new_file, new_note))
+}
+
+/// Rewrite the passage `src_start..src_end` (single-line) to `replacement`,
+/// wrapping it in a `<span data-rewrite-id="N">` and recording the change as
+/// an EDIT revision.  Returns the new file and the assigned rewrite id.
+pub fn rewrite_passage_at(
+    raw: &str,
+    src_start: usize,
+    src_end: usize,
+    replacement: &str,
+) -> Result<(String, u32), String> {
+    let (mut header, _) = parse_blocks(raw)?;
+    let rewrite_id = header.next_rewrite_id;
+    header.next_rewrite_id = rewrite_id + 1;
+    let now = chrono::Utc::now().to_rfc3339();
+
+    let content = reconstruct(raw)?;
+
+    if src_start > src_end || src_end > content.len() {
+        return Err(format!(
+            "invalid range {}..{} (source length {})",
+            src_start,
+            src_end,
+            content.len()
+        ));
+    }
+
+    let (start_line, line_start, line_end) = locate_byte(&content, src_start)?;
+    let (end_line, _, _) = locate_byte(&content, src_end)?;
+
+    if start_line != end_line {
+        return Err("multi-line selections are not supported for rewrite".to_string());
+    }
+
+    let start_in_line = src_start - line_start;
+    let end_in_line = src_end - line_start;
+    let line = &content[line_start..line_end];
+
+    if !line.is_char_boundary(start_in_line) || !line.is_char_boundary(end_in_line) {
+        return Err("byte positions are not on UTF-8 character boundaries".to_string());
+    }
+
+    let span_text = format!(
+        r#"<span data-rewrite-id="{}">{}</span>"#,
+        rewrite_id,
+        html_escape(replacement),
+    );
+    let new_line = format!(
+        "{}{}{}",
+        &line[..start_in_line],
+        span_text,
+        &line[end_in_line..]
+    );
+    let line_number = start_line + 1;
+    let new_sha1 = sha1_hex(&new_line);
+    let file_id = header.id.clone();
+
+    header.revisions.push(RevisionMeta {
+        id: new_sha1.clone(),
+        ctime: now,
+        action_id: uuid::Uuid::new_v4().to_string(),
+        revision_type: RevisionType::Edit,
+        line_start: line_number,
+        line_end: Some(line_number),
+    });
+
+    commit_line_edit(raw, &header, &file_id, &new_sha1, &new_line)
+        .map(|f| (f, rewrite_id))
+}
+
+/// Add an SVG artifact using exact byte positions.
+///
+/// `src_start..src_end` identifies the selection in the reconstructed markdown.
+/// Wide images (aspect_ratio >= 1) go on their own paragraph after the source
+/// line; tall images are inserted inline at `src_end`.
+/// The selection text `src_start..src_end` is stored as the artifact's
+/// `source` field for later re-generation.
+pub fn add_artifact_at(
+    raw: &str,
+    src_start: usize,
+    src_end: usize,
+    svg: &str,
+    caption: &str,
+    aspect_ratio: f32,
+    semantic_type: &str,
+) -> Result<(String, ArtifactMeta), String> {
+    let (mut header, _) = parse_blocks(raw)?;
+    let artifact_id = header.next_artifact_id;
+    header.next_artifact_id = artifact_id + 1;
+    let now = chrono::Utc::now().to_rfc3339();
+
+    let content = reconstruct(raw)?;
+
+    if src_start > src_end || src_end > content.len() {
+        return Err(format!(
+            "invalid range {}..{} (source length {})",
+            src_start,
+            src_end,
+            content.len()
+        ));
+    }
+
+    // Extract the selection text from the source for the `source` field.
+    let selection_text = content[src_start..src_end].to_string();
+
+    let alt = sanitize_alt(caption);
+    let image_md = format!("![{}](epar://{})", alt, artifact_id);
+
+    let (line_idx, new_block) = if aspect_ratio >= 1.0 {
+        // Wide: block paragraph after the source line.
+        let (line_idx, line_start, line_end) = locate_byte(&content, src_start)?;
+        let line = &content[line_start..line_end];
+        (line_idx, format!("{}\n\n{}", line, image_md))
+    } else {
+        // Tall: inline at src_end.
+        let (line_idx, line_start, line_end) = locate_byte(&content, src_end)?;
+        let offset_in_line = src_end - line_start;
+        let line = &content[line_start..line_end];
+        if !line.is_char_boundary(offset_in_line) {
+            return Err(format!(
+                "byte position {} is not on a UTF-8 character boundary",
+                src_end
+            ));
+        }
+        let new_line = format!(
+            "{} {}{}",
+            &line[..offset_in_line],
+            image_md,
+            &line[offset_in_line..]
+        );
+        (line_idx, new_line)
+    };
+
+    let line_number = line_idx + 1;
+    let new_sha1 = sha1_hex(&new_block);
+    let file_id = header.id.clone();
+
+    header.revisions.push(RevisionMeta {
+        id: new_sha1.clone(),
+        ctime: now.clone(),
+        action_id: uuid::Uuid::new_v4().to_string(),
+        revision_type: RevisionType::Edit,
+        line_start: line_number,
+        line_end: Some(line_number),
+    });
+
+    let artifact = ArtifactMeta {
+        id: artifact_id,
+        mime_type: "image/svg+xml".to_string(),
+        semantic_type: semantic_type.to_string(),
+        ctime: now,
+        caption: if caption.trim().is_empty() {
+            None
+        } else {
+            Some(caption.trim().to_string())
+        },
+        aspect_ratio,
+        source: selection_text,
+    };
+    header.artifacts.push(artifact.clone());
+
+    let header_json = serde_json::to_string_pretty(&header).expect("header serialization");
+    let raw_lines: Vec<&str> = raw.lines().collect();
+    let body_start = raw_lines
+        .iter()
+        .position(|l| parse_delimiter(l).is_some())
+        .ok_or("no delimiter in edupage")?;
+    let existing_body = raw_lines[body_start..].join("\n");
+
+    let mut new_file = header_json;
+    new_file.push('\n');
+    new_file.push_str(&existing_body);
+    new_file.push('\n');
+    new_file.push_str(&delimiter(&file_id, &new_sha1));
+    new_file.push('\n');
+    new_file.push_str(&new_block);
+    new_file.push('\n');
+    new_file.push_str(&artifact_delimiter(&file_id, artifact_id));
+    new_file.push('\n');
+    new_file.push_str(svg);
+
+    Ok((new_file, artifact))
+}
+
+/// Insert an appendix cross-reference marker `[^A<seq>]` at `src_end`.
+pub fn insert_appendix_ref_at(
+    raw: &str,
+    appendix_seq: u32,
+    src_end: usize,
+) -> Result<String, String> {
+    let anchor = format!("[^A{}]", appendix_seq);
+    insert_at(raw, src_end, &anchor)
 }
 
 #[cfg(test)]

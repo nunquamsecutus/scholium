@@ -1,11 +1,10 @@
 import { createSignal, createEffect, createMemo, For, Match, onCleanup, onMount, Show, Switch } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { marked } from "marked";
-import DOMPurify from "dompurify";
 import type { Chapter, Manifest } from "../types/manifest";
 import SelectionToolbar from "./SelectionToolbar";
 import BookLoader from "./BookLoader";
+import { resolveSourceRange } from "../lib/selection";
 
 // Pagination unit comes from the article's clientWidth at runtime — see the
 // page-window / chapter-content split in App.css. The browser fits one column
@@ -14,7 +13,7 @@ import BookLoader from "./BookLoader";
 // hardcoded constant.
 
 interface GenerateResult {
-  content: string;
+  html: string;
   manifest: Manifest;
 }
 
@@ -38,12 +37,16 @@ interface ArtifactFromBackend {
 }
 
 interface ChapterContent {
-  content: string;
+  /** Source-annotated HTML from the Rust renderer. Set directly as innerHTML. */
+  html: string;
   notes: NoteFromBackend[];
   artifacts: ArtifactFromBackend[];
 }
 
-interface AppendixResult extends ChapterContent {
+interface AppendixResult {
+  html: string;
+  notes: NoteFromBackend[];
+  artifacts: ArtifactFromBackend[];
   manifest: Manifest;
 }
 
@@ -64,111 +67,13 @@ interface Props {
   manifest: Manifest;
 }
 
-function displayForNote(type: string | undefined, id: string): string {
-  switch (type) {
-    case "definition":
-      return "📖";
-    case "footnote":
-    case "endnote":
-      return id;
-    default:
-      return "📖";
-  }
-}
-
-function labelForNote(note: NoteFromBackend | undefined, id: string): string {
-  if (!note) return `note ${id}`;
-  if (note.type === "footnote") return `Footnote ${id}`;
-  if (note.type === "endnote") return `Endnote ${id}`;
-  return `${note.type} of ${note.word}`;
-}
-
-// `[^*N]` = definition, `[^†N]` = footnote, `[^‡N]` = endnote,
-// `[^A<seq>]` = appendix cross-reference (link to chapter `ap-<seq>`).
-const ANCHOR_RE = /\[\^([*†‡A])(\d+)\]/g;
-
-function escapeHtml(s: string): string {
-  return s
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
-}
-
-// Replace `epar://<id>` markdown images (rendered by marked as
-// `<img src="epar://N">`) with a <figure> carrying the artifact's SVG. Runs
-// BEFORE sanitize so the injected SVG passes through DOMPurify (which strips
-// the non-standard epar:// scheme but allows SVG elements). Block vs float is
-// driven by the artifact's aspect ratio.
-function inlineArtifacts(html: string, artifacts: ArtifactFromBackend[]): string {
-  if (artifacts.length === 0) return html;
-  const byId = new Map<number, ArtifactFromBackend>(artifacts.map((a) => [a.id, a]));
-
-  const figureFor = (imgTag: string): string | null => {
-    const srcMatch = imgTag.match(/src="epar:\/\/(\d+)"/);
-    if (!srcMatch) return null;
-    const a = byId.get(Number(srcMatch[1]));
-    if (!a) return `<!-- missing artifact ${srcMatch[1]} -->`;
-    const cls = a.aspectRatio >= 1 ? "artifact artifact-block" : "artifact artifact-float";
-    const caption = a.caption ? `<figcaption>${escapeHtml(a.caption)}</figcaption>` : "";
-    return `<figure class="${cls}" data-artifact-id="${a.id}">${a.body}${caption}</figure>`;
-  };
-
-  // Paragraph-wrapped images become block figures (avoids <figure> inside <p>).
-  let out = html.replace(/<p>\s*(<img\b[^>]*>)\s*<\/p>/g, (whole, imgTag) => {
-    return figureFor(imgTag) ?? whole;
-  });
-  // Any remaining inline images.
-  out = out.replace(/<img\b[^>]*>/g, (imgTag) => figureFor(imgTag) ?? imgTag);
-  return out;
-}
-
-function renderMarkdown(
-  md: string,
-  notes: NoteFromBackend[],
-  artifacts: ArtifactFromBackend[] = [],
-): string {
-  const withArtifacts = inlineArtifacts(marked.parse(md) as string, artifacts);
-  const html = DOMPurify.sanitize(withArtifacts);
-  const byId = new Map<number, NoteFromBackend>(notes.map((n) => [n.id, n]));
-  let processed = html.replace(ANCHOR_RE, (_, marker, id) => {
-    if (marker === "A") {
-      return `<a class="appendix-ref" data-appendix-seq="${id}" role="link" tabindex="0">(see Appendix ${id})</a>`;
-    }
-    const note = byId.get(Number(id));
-    const type = note?.type ?? "unknown";
-    const display = displayForNote(note?.type, id);
-    const label = labelForNote(note, id);
-    return `<sup class="note-anchor" data-note-id="${id}" data-note-type="${type}" aria-label="${label}">${display}</sup>`;
-  });
-
-  // Append an "Endnotes" section at the end of the chapter for any endnotes
-  // present. It flows through the same column layout as the main content, so
-  // it lands on whichever page it falls on.
-  const endnotes = notes.filter((n) => n.type === "endnote");
-  if (endnotes.length > 0) {
-    let section = '<hr class="endnotes-rule" /><section class="endnotes" aria-label="Endnotes"><h2 class="endnotes-heading">Endnotes</h2><ol class="endnotes-list">';
-    for (const en of endnotes) {
-      const body = DOMPurify.sanitize(marked.parse(en.body) as string);
-      section += `<li id="endnote-${en.id}" data-endnote-target="${en.id}" class="endnote-item"><span class="endnote-number">${en.id}.</span><div class="endnote-body">${body}</div></li>`;
-    }
-    section += "</ol></section>";
-    processed += section;
-  }
-
-  return processed;
-}
-
-function isWordChar(c: string): boolean {
-  return /[\p{L}\p{N}'\-]/u.test(c);
-}
+const BLOCK_TAGS = new Set(["P", "LI", "BLOCKQUOTE", "H1", "H2", "H3", "H4", "H5", "H6"]);
 
 // Returns the text of the closest block-level ancestor (paragraph, list item,
 // heading, blockquote) of `range`'s start, truncated to `max` characters.
 // Falls back to the container's text if no block ancestor is found. Used to
 // give the LLM enough surrounding context to pick the right sense of a word.
 export function paragraphContext(range: Range, container: HTMLElement, max = 1000): string {
-  const BLOCK_TAGS = new Set(["P", "LI", "BLOCKQUOTE", "H1", "H2", "H3", "H4", "H5", "H6"]);
   let node: Node | null = range.startContainer;
   while (node && node !== container) {
     if (node.nodeType === Node.ELEMENT_NODE && BLOCK_TAGS.has((node as HTMLElement).tagName)) {
@@ -178,64 +83,6 @@ export function paragraphContext(range: Range, container: HTMLElement, max = 100
     node = node.parentNode;
   }
   return (container.textContent ?? "").slice(0, max);
-}
-
-const BLOCK_TAGS = new Set(["P", "LI", "BLOCKQUOTE", "H1", "H2", "H3", "H4", "H5", "H6"]);
-
-function blockAncestor(node: Node, container: HTMLElement): HTMLElement | null {
-  let n: Node | null = node;
-  while (n && n !== container) {
-    if (n.nodeType === Node.ELEMENT_NODE && BLOCK_TAGS.has((n as HTMLElement).tagName)) {
-      return n as HTMLElement;
-    }
-    n = n.parentNode;
-  }
-  return null;
-}
-
-// Returns the 1-based occurrence index of `word` (word-bounded) covering the
-// start of `range` within `container`. Text nodes inside the same block-level
-// ancestor are concatenated into one searchable corpus (so a phrase that
-// crosses inline formatting like `<strong>` is still findable); a "\n"
-// separator is inserted between text from different blocks so cross-paragraph
-// matches don't bleed and word boundaries are preserved. Returns -1 if not
-// found.
-export function occurrenceIndex(range: Range, container: HTMLElement, word: string): number {
-  const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
-  let corpus = "";
-  let targetOffset = -1;
-  let lastBlock: HTMLElement | null = null;
-  let node = walker.nextNode();
-  while (node) {
-    const block = blockAncestor(node, container);
-    if (lastBlock !== null && block !== lastBlock) {
-      corpus += "\n";
-    }
-    lastBlock = block;
-    if (node === range.startContainer) {
-      targetOffset = corpus.length + range.startOffset;
-    }
-    corpus += node.textContent ?? "";
-    node = walker.nextNode();
-  }
-  if (targetOffset < 0) return -1;
-
-  let count = 0;
-  let i = 0;
-  while (i <= corpus.length - word.length) {
-    if (corpus.substring(i, i + word.length) === word) {
-      const before = i === 0 ? "" : corpus[i - 1];
-      const after = i + word.length >= corpus.length ? "" : corpus[i + word.length];
-      if (!isWordChar(before) && !isWordChar(after)) {
-        count++;
-        if (i <= targetOffset && targetOffset <= i + word.length) {
-          return count;
-        }
-      }
-    }
-    i++;
-  }
-  return -1;
 }
 
 export default function BookView(props: Props) {
@@ -530,7 +377,7 @@ export default function BookView(props: Props) {
       });
       setContentCache((c) => ({
         ...c,
-        [chapterId]: renderMarkdown(result.content, result.notes, result.artifacts),
+        [chapterId]: result.html,
       }));
       setChapterNotes((m) => ({ ...m, [chapterId]: result.notes }));
       setEditArtifact(null);
@@ -553,7 +400,7 @@ export default function BookView(props: Props) {
     if (ch.status === "generated" && !contentCache()[ch.id]) {
       try {
         const result = await invoke<ChapterContent>("read_chapter", { chapterId: ch.id });
-        setContentCache((c) => ({ ...c, [ch.id]: renderMarkdown(result.content, result.notes, result.artifacts) }));
+        setContentCache((c) => ({ ...c, [ch.id]: result.html }));
         setChapterNotes((m) => ({ ...m, [ch.id]: result.notes }));
       } catch (e) {
         setError(String(e));
@@ -578,7 +425,7 @@ export default function BookView(props: Props) {
     try {
       const result = await invoke<GenerateResult>("generate_chapter", { chapterId });
       setManifest(result.manifest);
-      setContentCache((c) => ({ ...c, [chapterId]: renderMarkdown(result.content, [], []) }));
+      setContentCache((c) => ({ ...c, [chapterId]: result.html }));
       setChapterNotes((m) => ({ ...m, [chapterId]: [] }));
       setSelectedId(chapterId);
       setCurrentPage(0);
@@ -599,7 +446,7 @@ export default function BookView(props: Props) {
   }
 
   // Shared wrapper for highlight-driven commands that return a ChapterContent.
-  // Manages the busy indicator and applies the returned content + notes.
+  // Manages the busy indicator and applies the returned html + notes.
   async function runContentCommand(
     busyMessage: string,
     command: string,
@@ -611,10 +458,7 @@ export default function BookView(props: Props) {
     setBusy(busyMessage);
     try {
       const result = await invoke<ChapterContent>(command, args);
-      setContentCache((c) => ({
-        ...c,
-        [chapterId]: renderMarkdown(result.content, result.notes, result.artifacts),
-      }));
+      setContentCache((c) => ({ ...c, [chapterId]: result.html }));
       setChapterNotes((m) => ({ ...m, [chapterId]: result.notes }));
     } catch (e) {
       setError(String(e));
@@ -624,19 +468,25 @@ export default function BookView(props: Props) {
     }
   }
 
-  // Resolve the chapter, article, and word-occurrence index shared by every
-  // phrase-driven action. Returns null (after setting an error) if the
-  // selection can't be located in the source.
-  function resolvePhrase(phrase: string, range: Range) {
+  // Resolve the chapter and exact source byte range for a selection.
+  // Returns null (after setting an error) if the selection can't be mapped to
+  // source positions (e.g., the user selected inside a note anchor or figure).
+  function resolvePhrase(selectionText: string, range: Range) {
     const chapterId = selectedId();
     const article = articleRef();
     if (!chapterId || !article) return null;
-    const occurrence = occurrenceIndex(range, article, phrase);
-    if (occurrence < 0) {
-      setError(`Could not locate "${phrase}" in the chapter source.`);
+    const sourceRange = resolveSourceRange(range, article);
+    if (!sourceRange) {
+      setError(`Could not locate "${selectionText}" in the chapter source.`);
       return null;
     }
-    return { chapterId, occurrence, context: paragraphContext(range, article) };
+    return {
+      chapterId,
+      srcStart: sourceRange.srcStart,
+      srcEnd: sourceRange.srcEnd,
+      selectionText,
+      context: paragraphContext(range, article),
+    };
   }
 
   async function handleFootnote(phrase: string, range: Range) {
@@ -644,8 +494,8 @@ export default function BookView(props: Props) {
     if (!r) return;
     await runContentCommand("Writing footnote…", "add_footnote", {
       chapterId: r.chapterId,
-      selection: phrase,
-      occurrenceIndex: r.occurrence,
+      selectionText: r.selectionText,
+      srcEnd: r.srcEnd,
       context: r.context,
     });
   }
@@ -655,8 +505,8 @@ export default function BookView(props: Props) {
     if (!r) return;
     await runContentCommand("Writing endnote…", "add_endnote", {
       chapterId: r.chapterId,
-      selection: phrase,
-      occurrenceIndex: r.occurrence,
+      selectionText: r.selectionText,
+      srcEnd: r.srcEnd,
       context: r.context,
     });
   }
@@ -725,7 +575,7 @@ export default function BookView(props: Props) {
         context: dialog.context,
         history: dialog.messages,
       });
-      setContentCache((c) => ({ ...c, [chapterId]: renderMarkdown(result.content, result.notes, result.artifacts) }));
+      setContentCache((c) => ({ ...c, [chapterId]: result.html }));
       setChapterNotes((m) => ({ ...m, [chapterId]: result.notes }));
       setRewriteDialog(null);
     } catch (e) {
@@ -739,8 +589,9 @@ export default function BookView(props: Props) {
     if (!r) return;
     await runContentCommand("Drawing a picture…", "add_image", {
       chapterId: r.chapterId,
-      selection: phrase,
-      occurrenceIndex: r.occurrence,
+      selectionText: r.selectionText,
+      srcStart: r.srcStart,
+      srcEnd: r.srcEnd,
       context: r.context,
     });
   }
@@ -750,8 +601,9 @@ export default function BookView(props: Props) {
     if (!r) return;
     await runContentCommand("Drawing a diagram…", "add_diagram", {
       chapterId: r.chapterId,
-      selection: phrase,
-      occurrenceIndex: r.occurrence,
+      selectionText: r.selectionText,
+      srcStart: r.srcStart,
+      srcEnd: r.srcEnd,
       context: r.context,
     });
   }
@@ -761,8 +613,9 @@ export default function BookView(props: Props) {
     if (!r) return;
     await runContentCommand("Rewriting…", "rewrite_passage", {
       chapterId: r.chapterId,
-      selection: phrase,
-      occurrenceIndex: r.occurrence,
+      selectionText: r.selectionText,
+      srcStart: r.srcStart,
+      srcEnd: r.srcEnd,
       context: r.context,
     });
   }
@@ -774,15 +627,12 @@ export default function BookView(props: Props) {
     try {
       const result = await invoke<AppendixResult>("add_appendix", {
         chapterId: r.chapterId,
-        selection: phrase,
-        occurrenceIndex: r.occurrence,
+        selectionText: r.selectionText,
+        srcEnd: r.srcEnd,
         context: r.context,
       });
       setManifest(result.manifest);
-      setContentCache((c) => ({
-        ...c,
-        [r.chapterId]: renderMarkdown(result.content, result.notes, result.artifacts),
-      }));
+      setContentCache((c) => ({ ...c, [r.chapterId]: result.html }));
       setChapterNotes((m) => ({ ...m, [r.chapterId]: result.notes }));
     } catch (e) {
       setError(String(e));
@@ -803,8 +653,8 @@ export default function BookView(props: Props) {
     if (!r) return;
     await runContentCommand("Looking up definition…", "define_word", {
       chapterId: r.chapterId,
-      word,
-      occurrenceIndex: r.occurrence,
+      word: r.selectionText,
+      srcEnd: r.srcEnd,
       context: r.context,
     });
   }

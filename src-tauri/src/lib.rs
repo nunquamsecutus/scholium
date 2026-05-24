@@ -9,6 +9,7 @@ mod import;
 mod llm;
 mod manifest;
 mod onboarding;
+mod render;
 mod rewrite;
 mod settings;
 
@@ -450,7 +451,8 @@ async fn generate_lesson_plan(
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GenerateChapterResult {
-    pub content: String,
+    /// Fully-rendered, source-annotated HTML produced by `render::render_chapter_html`.
+    pub html: String,
     pub manifest: manifest::Manifest,
 }
 
@@ -514,7 +516,9 @@ async fn generate_chapter(
     book.metadata.modified = chrono::Utc::now().to_rfc3339();
     manifest::save(&book, &book_path)?;
 
-    Ok(GenerateChapterResult { content, manifest: book })
+    // Render immediately so the frontend receives HTML rather than raw markdown.
+    let html = render::render_chapter_html(&content, &[], &[]);
+    Ok(GenerateChapterResult { html, manifest: book })
 }
 
 #[tauri::command]
@@ -536,7 +540,7 @@ async fn define_word(
     state: tauri::State<'_, AppState>,
     chapter_id: String,
     word: String,
-    occurrence_index: u32,
+    src_end: usize,
     context: String,
 ) -> Result<ChapterContent, String> {
     if word.trim().is_empty() {
@@ -567,11 +571,11 @@ async fn define_word(
     let chapter_path = chapter_path_for(&state, &chapter_id)?;
     let raw_file = std::fs::read_to_string(&chapter_path)
         .map_err(|e| format!("failed to read chapter: {e}"))?;
-    let (new_raw, _) = edupage::add_note(
+    let (new_raw, _) = edupage::add_note_at(
         &raw_file,
         edupage::NoteType::Definition,
         &word,
-        occurrence_index,
+        src_end,
         &definition,
     )?;
     std::fs::write(&chapter_path, &new_raw)
@@ -586,15 +590,19 @@ async fn define_word(
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChapterContent {
-    pub content: String,
+    /// Fully-rendered, source-annotated HTML from `render::render_chapter_html`.
+    /// The frontend sets this directly as `innerHTML`; no further markdown
+    /// processing is required.
+    pub html: String,
     pub notes: Vec<edupage::NoteWithBody>,
     pub artifacts: Vec<edupage::ArtifactWithBody>,
 }
 
 impl ChapterContent {
     fn from_page(page: edupage::EduPage) -> Self {
+        let html = render::render_chapter_html(&page.content, &page.notes, &page.artifacts);
         ChapterContent {
-            content: page.content,
+            html,
             notes: page.notes,
             artifacts: page.artifacts,
         }
@@ -628,10 +636,11 @@ fn chapter_path_for(
 async fn add_footnote(
     state: tauri::State<'_, AppState>,
     chapter_id: String,
-    selection: String,
-    occurrence_index: u32,
+    selection_text: String,
+    src_end: usize,
     context: String,
 ) -> Result<ChapterContent, String> {
+    let selection = &selection_text;
     if selection.trim().is_empty() {
         return Err("empty selection".to_string());
     }
@@ -660,11 +669,11 @@ async fn add_footnote(
     let chapter_path = chapter_path_for(&state, &chapter_id)?;
     let raw_file = std::fs::read_to_string(&chapter_path)
         .map_err(|e| format!("failed to read chapter: {e}"))?;
-    let (new_raw, _) = edupage::add_note(
+    let (new_raw, _) = edupage::add_note_at(
         &raw_file,
         edupage::NoteType::Footnote,
-        &selection,
-        occurrence_index,
+        selection,
+        src_end,
         &body,
     )?;
     std::fs::write(&chapter_path, &new_raw)
@@ -678,10 +687,11 @@ async fn add_footnote(
 async fn add_endnote(
     state: tauri::State<'_, AppState>,
     chapter_id: String,
-    selection: String,
-    occurrence_index: u32,
+    selection_text: String,
+    src_end: usize,
     context: String,
 ) -> Result<ChapterContent, String> {
+    let selection = &selection_text;
     if selection.trim().is_empty() {
         return Err("empty selection".to_string());
     }
@@ -710,11 +720,11 @@ async fn add_endnote(
     let chapter_path = chapter_path_for(&state, &chapter_id)?;
     let raw_file = std::fs::read_to_string(&chapter_path)
         .map_err(|e| format!("failed to read chapter: {e}"))?;
-    let (new_raw, _) = edupage::add_note(
+    let (new_raw, _) = edupage::add_note_at(
         &raw_file,
         edupage::NoteType::Endnote,
-        &selection,
-        occurrence_index,
+        selection,
+        src_end,
         &body,
     )?;
     std::fs::write(&chapter_path, &new_raw)
@@ -729,30 +739,30 @@ async fn add_image(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     chapter_id: String,
-    selection: String,
-    occurrence_index: u32,
+    selection_text: String,
+    src_start: usize,
+    src_end: usize,
     context: String,
 ) -> Result<ChapterContent, String> {
-    if selection.trim().is_empty() {
+    if selection_text.trim().is_empty() {
         return Err("empty selection".to_string());
     }
     if context.trim().is_empty() {
         return Err("empty context".to_string());
     }
 
-    // The pipeline doesn't consult reading_level or topic; the prompts speak
-    // directly to "professional quality art" without level-specific phrasing.
     let settings = state.settings.lock().unwrap().clone();
-    let generated = run_image_pipeline(&app, &settings, &selection, &context, None).await?;
+    let generated =
+        run_image_pipeline(&app, &settings, &selection_text, &context, None).await?;
     let aspect = image::aspect_ratio_of(&generated.svg);
 
     let chapter_path = chapter_path_for(&state, &chapter_id)?;
     let raw_file = std::fs::read_to_string(&chapter_path)
         .map_err(|e| format!("failed to read chapter: {e}"))?;
-    let (new_raw, _) = edupage::add_artifact(
+    let (new_raw, _) = edupage::add_artifact_at(
         &raw_file,
-        &selection,
-        occurrence_index,
+        src_start,
+        src_end,
         &generated.svg,
         &generated.caption,
         aspect,
@@ -770,11 +780,12 @@ async fn add_diagram(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     chapter_id: String,
-    selection: String,
-    occurrence_index: u32,
+    selection_text: String,
+    src_start: usize,
+    src_end: usize,
     context: String,
 ) -> Result<ChapterContent, String> {
-    if selection.trim().is_empty() {
+    if selection_text.trim().is_empty() {
         return Err("empty selection".to_string());
     }
     if context.trim().is_empty() {
@@ -789,15 +800,13 @@ async fn add_diagram(
         .ok_or("no book is open")?;
     let book = manifest::load(&book_path)?;
     let reading_level = book.metadata.reading_level.as_deref().unwrap_or("adult");
-    // The original learning prompt becomes the domain hint, skipped when empty
-    // (which is the case for imported books).
     let original_prompt = Some(book.metadata.prompt.as_str()).filter(|s| !s.is_empty());
 
     let settings = state.settings.lock().unwrap().clone();
     let generated = run_diagram_pipeline(
         &app,
         &settings,
-        &selection,
+        &selection_text,
         &context,
         reading_level,
         original_prompt,
@@ -808,10 +817,10 @@ async fn add_diagram(
     let chapter_path = chapter_path_for(&state, &chapter_id)?;
     let raw_file = std::fs::read_to_string(&chapter_path)
         .map_err(|e| format!("failed to read chapter: {e}"))?;
-    let (new_raw, _) = edupage::add_artifact(
+    let (new_raw, _) = edupage::add_artifact_at(
         &raw_file,
-        &selection,
-        occurrence_index,
+        src_start,
+        src_end,
         &generated.svg,
         &generated.caption,
         aspect,
@@ -911,10 +920,12 @@ fn delete_artifact(
 async fn rewrite_passage(
     state: tauri::State<'_, AppState>,
     chapter_id: String,
-    selection: String,
-    occurrence_index: u32,
+    selection_text: String,
+    src_start: usize,
+    src_end: usize,
     context: String,
 ) -> Result<ChapterContent, String> {
+    let selection = &selection_text;
     if selection.trim().is_empty() {
         return Err("empty selection".to_string());
     }
@@ -944,7 +955,7 @@ async fn rewrite_passage(
     let raw_file = std::fs::read_to_string(&chapter_path)
         .map_err(|e| format!("failed to read chapter: {e}"))?;
     let (new_raw, _) =
-        edupage::rewrite_passage(&raw_file, &selection, occurrence_index, &replacement)?;
+        edupage::rewrite_passage_at(&raw_file, src_start, src_end, &replacement)?;
     std::fs::write(&chapter_path, &new_raw)
         .map_err(|e| format!("failed to write chapter: {e}"))?;
 
@@ -1030,7 +1041,7 @@ async fn rewrite_with_conversation(
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppendixResult {
-    pub content: String,
+    pub html: String,
     pub notes: Vec<edupage::NoteWithBody>,
     pub artifacts: Vec<edupage::ArtifactWithBody>,
     pub manifest: manifest::Manifest,
@@ -1052,10 +1063,11 @@ fn appendix_title_from(seq: u32, selection: &str) -> String {
 async fn add_appendix(
     state: tauri::State<'_, AppState>,
     chapter_id: String,
-    selection: String,
-    occurrence_index: u32,
+    selection_text: String,
+    src_end: usize,
     context: String,
 ) -> Result<AppendixResult, String> {
+    let selection = &selection_text;
     if selection.trim().is_empty() {
         return Err("empty selection".to_string());
     }
@@ -1134,13 +1146,14 @@ async fn add_appendix(
     let source_raw = std::fs::read_to_string(&source_path)
         .map_err(|e| format!("failed to read source chapter: {e}"))?;
     let new_source_raw =
-        edupage::insert_appendix_ref(&source_raw, seq, &selection, occurrence_index)?;
+        edupage::insert_appendix_ref_at(&source_raw, seq, src_end)?;
     std::fs::write(&source_path, &new_source_raw)
         .map_err(|e| format!("failed to write source chapter: {e}"))?;
 
     let page = edupage::read(&new_source_raw)?;
+    let html = render::render_chapter_html(&page.content, &page.notes, &page.artifacts);
     Ok(AppendixResult {
-        content: page.content,
+        html,
         notes: page.notes,
         artifacts: page.artifacts,
         manifest: book,
@@ -1169,7 +1182,7 @@ fn add_note(
     chapter_id: String,
     note_type: String,
     word: String,
-    occurrence_index: u32,
+    src_end: usize,
     body: String,
 ) -> Result<ChapterContent, String> {
     let chapter_path = chapter_path_for(&state, &chapter_id)?;
@@ -1181,7 +1194,7 @@ fn add_note(
         other => return Err(format!("unknown note type: {other}")),
     };
 
-    let (new_raw, _) = edupage::add_note(&raw, nt, &word, occurrence_index, &body)?;
+    let (new_raw, _) = edupage::add_note_at(&raw, nt, &word, src_end, &body)?;
 
     std::fs::write(&chapter_path, &new_raw)
         .map_err(|e| format!("failed to write chapter: {e}"))?;
