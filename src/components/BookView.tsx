@@ -119,6 +119,12 @@ export default function BookView(props: Props) {
   const [editArtifact, setEditArtifact] = createSignal<{ id: number; context: string } | null>(null);
   const [editInstruction, setEditInstruction] = createSignal("");
   const [editSending, setEditSending] = createSignal(false);
+  // Zoom lightbox: holds the extracted SVG markup and caption while the
+  // full-screen overlay is open.
+  const [zoomedArtifact, setZoomedArtifact] = createSignal<{
+    svgHtml: string;
+    caption: string | null;
+  } | null>(null);
   const [generating, setGenerating] = createSignal(false);
   const [error, setError] = createSignal("");
   const [articleRef, setArticleRef] = createSignal<HTMLElement>();
@@ -215,6 +221,13 @@ export default function BookView(props: Props) {
   // turn pages.
   onMount(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (zoomedArtifact()) {
+        if (e.key === "Escape") {
+          setZoomedArtifact(null);
+          e.preventDefault();
+        }
+        return;
+      }
       if (editArtifact()) {
         if (e.key === "Escape" && !editSending()) {
           setEditArtifact(null);
@@ -358,6 +371,19 @@ export default function BookView(props: Props) {
     setActiveArtifact(null);
     setEditArtifact({ id: artifactId, context });
     setEditInstruction("");
+  }
+
+  function handleZoomArtifact(artifactId: number) {
+    const article = articleRef();
+    const figure = article?.querySelector(
+      `[data-artifact-id="${artifactId}"]`,
+    ) as HTMLElement | null;
+    if (!figure) return;
+    const svgEl = figure.querySelector("svg");
+    if (!svgEl) return;
+    const caption = figure.querySelector("figcaption")?.textContent ?? null;
+    setActiveArtifact(null);
+    setZoomedArtifact({ svgHtml: svgEl.outerHTML, caption });
   }
 
   async function applyRegenerate() {
@@ -795,7 +821,7 @@ export default function BookView(props: Props) {
           >
             <Show when={imageProgress()?.svg}>
               {(svg) => (
-                <div class="busy-preview" innerHTML={DOMPurify.sanitize(svg())} />
+                <div class="busy-preview" innerHTML={svg()} />
               )}
             </Show>
             <div class="busy-pill-row">
@@ -828,6 +854,19 @@ export default function BookView(props: Props) {
                 when={confirmingArtifactDelete()}
                 fallback={
                   <>
+                    <button
+                      type="button"
+                      class="artifact-ctrl"
+                      aria-label="Zoom in"
+                      onClick={() => handleZoomArtifact(a().id)}
+                    >
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <circle cx="11" cy="11" r="8"/>
+                        <path d="m21 21-4.35-4.35"/>
+                        <line x1="11" y1="8" x2="11" y2="14"/>
+                        <line x1="8" y1="11" x2="14" y2="11"/>
+                      </svg>
+                    </button>
                     <button
                       type="button"
                       class="artifact-ctrl"
@@ -928,6 +967,36 @@ export default function BookView(props: Props) {
               </div>
             </div>
           </div>
+        </Show>
+
+        <Show when={zoomedArtifact()}>
+          {(z) => (
+            <div
+              class="artifact-zoom-backdrop"
+              role="presentation"
+              onClick={() => setZoomedArtifact(null)}
+            >
+              <div
+                class="artifact-zoom-dialog"
+                role="dialog"
+                aria-label="Zoomed diagram"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <button
+                  type="button"
+                  class="artifact-zoom-close"
+                  aria-label="Close zoom"
+                  onClick={() => setZoomedArtifact(null)}
+                >
+                  ×
+                </button>
+                <div class="artifact-zoom-svg" innerHTML={z().svgHtml} />
+                <Show when={z().caption}>
+                  <figcaption class="artifact-zoom-caption">{z().caption}</figcaption>
+                </Show>
+              </div>
+            </div>
+          )}
         </Show>
 
         <Show when={rewriteDialog()}>
