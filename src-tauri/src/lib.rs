@@ -42,29 +42,53 @@ async fn dispatch_llm(
     }
 }
 
-// Text dispatch for the image pipeline. On Claude the caller picks the model
-// (different phases use different models); Ollama uses its configured model.
-async fn dispatch_image_text(
+// Text dispatch for image/diagram *generation* steps (composition, initial
+// render, polish, improve). Routes through `settings.image_provider` — which
+// may differ from the general `settings.provider` — using the matching
+// image-specific model name.
+async fn dispatch_gen_text(
     settings: &Settings,
-    model: &str,
     messages: Vec<llm::LlmMessage>,
 ) -> Result<String, String> {
-    match settings.provider {
+    match settings.image_provider {
         LlmProvider::Claude => {
             let key = settings
                 .claude_api_key
                 .as_ref()
                 .ok_or("Claude API key not configured — set it in Settings (⌘,)")?;
-            llm::call_claude(key, model, messages).await
+            llm::call_claude(key, &settings.claude_image_model, messages).await
         }
         LlmProvider::Ollama => {
-            llm::call_ollama(&settings.ollama_url, &settings.ollama_model, messages).await
+            llm::call_ollama(&settings.ollama_url, &settings.ollama_image_model, messages).await
         }
     }
 }
 
-// Vision dispatch for the image pipeline. Only Claude is implemented; Ollama
+// Vision dispatch for image/diagram *generation* steps (polish). Routes
+// through `settings.image_provider`. Only Claude supports vision; Ollama
 // returns an error so the polish loop falls back to the current candidate.
+async fn dispatch_gen_vision(
+    settings: &Settings,
+    messages: Vec<llm::LlmMessage>,
+    image: &llm::LlmImage,
+) -> Result<String, String> {
+    match settings.image_provider {
+        LlmProvider::Claude => {
+            let key = settings
+                .claude_api_key
+                .as_ref()
+                .ok_or("Claude API key not configured")?;
+            llm::call_claude_vision(key, &settings.claude_image_model, messages, image).await
+        }
+        LlmProvider::Ollama => {
+            Err("vision polish is not supported for the Ollama provider".to_string())
+        }
+    }
+}
+
+// Vision dispatch for image/diagram *evaluation* steps (critique). The caller
+// passes an explicit model (typically Haiku) so evaluation cost is kept
+// separate from generation cost regardless of the image model setting.
 async fn dispatch_image_vision(
     settings: &Settings,
     model: &str,
@@ -80,7 +104,7 @@ async fn dispatch_image_vision(
             llm::call_claude_vision(key, model, messages, image).await
         }
         LlmProvider::Ollama => {
-            Err("vision polish is not supported for the Ollama provider".to_string())
+            Err("vision critique is not supported for the Ollama provider".to_string())
         }
     }
 }
@@ -129,15 +153,18 @@ async fn run_polish_loop(
     let max = image::total_iterations(pipeline);
     let caption = image::derive_caption(&composition);
 
-    let mut svg: Option<String> = None;
+    // Track the current best artifact as (body, mime_type).  SVG bodies are
+    // text; raster bodies are base64-encoded bytes.
+    let mut artifact: Option<(String, String)> = None;
     let mut critique: Option<String> = None;
     let mut pass: usize = 0;
 
     for step in &pipeline.steps {
         if step.critique_first {
-            if let Some(current) = &svg {
-                emit_progress(app, "critique", pass, max, current);
-                if let Ok(png) = image::rasterize_svg_to_png(current) {
+            if let Some((body, mime)) = &artifact {
+                let preview = image::preview_html(body, mime);
+                emit_progress(app, "critique", pass, max, &preview);
+                if let Ok(png) = image::to_png_bytes(body, mime) {
                     let llm_image = llm::LlmImage {
                         media_type: "image/png".to_string(),
                         base64_data: base64::engine::general_purpose::STANDARD.encode(&png),
@@ -160,13 +187,17 @@ async fn run_polish_loop(
 
         for _ in 0..step.iterations {
             pass += 1;
-            emit_progress(app, "rendering", pass, max, svg.as_deref().unwrap_or(""));
+            let preview = artifact
+                .as_ref()
+                .map(|(b, m)| image::preview_html(b, m))
+                .unwrap_or_default();
+            emit_progress(app, "rendering", pass, max, &preview);
 
-            if let Some(current) = svg.clone() {
-                let png = match image::rasterize_svg_to_png(&current) {
+            if let Some((body, mime)) = artifact.clone() {
+                let png = match image::to_png_bytes(&body, &mime) {
                     Ok(p) => p,
                     Err(e) => {
-                        eprintln!("artifact pipeline: rasterize failed, stopping polish: {e}");
+                        eprintln!("artifact pipeline: to_png_bytes failed, stopping polish: {e}");
                         break;
                     }
                 };
@@ -175,16 +206,15 @@ async fn run_polish_loop(
                     base64_data: base64::engine::general_purpose::STANDARD.encode(&png),
                 };
                 let messages = build_polish(&composition, critique.as_deref());
-                match dispatch_image_vision(settings, pipeline.polish_model, messages, &llm_image)
-                    .await
-                {
-                    Ok(resp) => match image::extract_svg(&resp) {
-                        Ok(next) => {
-                            svg = Some(next.clone());
-                            emit_progress(app, "rendering", pass, max, &next);
+                match dispatch_gen_vision(settings, messages, &llm_image).await {
+                    Ok(resp) => match image::extract_image_response(&resp) {
+                        Ok((new_mime, new_body)) => {
+                            let preview = image::preview_html(&new_body, &new_mime);
+                            artifact = Some((new_body, new_mime));
+                            emit_progress(app, "rendering", pass, max, &preview);
                         }
                         Err(e) => {
-                            eprintln!("artifact pipeline: polish returned no <svg>: {e}");
+                            eprintln!("artifact pipeline: polish returned no image: {e}");
                         }
                     },
                     Err(e) => {
@@ -194,17 +224,23 @@ async fn run_polish_loop(
                 }
             } else {
                 let messages = build_initial_render(&composition);
-                let resp =
-                    dispatch_image_text(settings, pipeline.first_render_model, messages).await?;
-                let initial = image::extract_svg(&resp)?;
-                svg = Some(initial.clone());
-                emit_progress(app, "rendering", pass, max, &initial);
+                let resp = dispatch_gen_text(settings, messages)
+                    .await
+                    .map_err(|e| { eprintln!("[polish loop] initial render call failed: {e}"); e })?;
+                eprintln!(
+                    "[polish loop] initial render response ({} chars): {:.200}",
+                    resp.len(), resp,
+                );
+                let (mime, body) = image::extract_image_response(&resp)?;
+                let preview = image::preview_html(&body, &mime);
+                artifact = Some((body, mime));
+                emit_progress(app, "rendering", pass, max, &preview);
             }
         }
     }
 
-    let svg = svg.ok_or("no SVG was produced")?;
-    Ok(image::GeneratedImage { svg, caption })
+    let (body, mime_type) = artifact.ok_or("no image was produced")?;
+    Ok(image::GeneratedImage { body, mime_type, caption })
 }
 
 async fn run_image_pipeline(
@@ -219,10 +255,37 @@ async fn run_image_pipeline(
 
     emit_progress(app, "composition", 0, max, "");
     let comp_messages = image::build_composition_messages(source, context, extra_instruction);
-    let composition = dispatch_image_text(settings, pipeline.composition_model, comp_messages)
-        .await?
+    let composition = dispatch_gen_text(settings, comp_messages)
+        .await
+        .map_err(|e| { eprintln!("[image pipeline] composition call failed: {e}"); e })?
         .trim()
         .to_string();
+    eprintln!(
+        "[image pipeline] composition result ({} chars): {:.300}",
+        composition.len(), composition,
+    );
+
+    // Diffusion-model fast-path: if the "composition" step returned image data
+    // instead of prose (e.g. Flux, SDXL), skip the SVG polish loop entirely.
+    // Re-run with a compact direct-generation prompt so the model is given a
+    // clean description rather than the verbose composition phrasing.
+    if image::extract_image_response(&composition).is_ok() {
+        eprintln!("[image pipeline] composition returned image data — diffusion model path");
+        emit_progress(app, "rendering", 1, 1, "");
+        let direct = image::build_direct_gen_messages(source, context, extra_instruction);
+        let resp = dispatch_gen_text(settings, direct)
+            .await
+            .map_err(|e| { eprintln!("[image pipeline] direct gen call failed: {e}"); e })?;
+        eprintln!(
+            "[image pipeline] direct gen result ({} chars): {:.200}",
+            resp.len(), resp,
+        );
+        let (mime, body) = image::extract_image_response(&resp)?;
+        let preview = image::preview_html(&body, &mime);
+        emit_progress(app, "rendering", 1, 1, &preview);
+        let caption = image::derive_caption(source);
+        return Ok(image::GeneratedImage { body, mime_type: mime, caption });
+    }
 
     run_polish_loop(
         app,
@@ -251,32 +314,54 @@ async fn run_diagram_pipeline(
 
     let max = diagram::TOTAL_PASSES;
 
-    // 1. Composition (Sonnet text).
+    // 1. Composition (image-gen model text).
     emit_progress(app, "composition", 0, max, "");
     let comp_messages =
         diagram::build_composition_messages(source, context, reading_level, original_prompt);
-    let composition = dispatch_image_text(settings, llm::CLAUDE_SONNET_MODEL, comp_messages)
+    let composition = dispatch_gen_text(settings, comp_messages)
         .await?
         .trim()
         .to_string();
+
+    eprintln!(
+        "[diagram pipeline] composition result ({} chars): {:.300}",
+        composition.len(), composition,
+    );
+
+    // Diffusion-model fast-path (same as image pipeline): if composition
+    // returned image data, re-run with a direct prompt and return immediately.
+    // Diffusion models can't produce the SVG-based diagram/improve loop.
+    if image::extract_image_response(&composition).is_ok() {
+        eprintln!("[diagram pipeline] composition returned image data — diffusion model path");
+        emit_progress(app, "rendering", 1, 1, "");
+        let direct = image::build_direct_gen_messages(source, context, None);
+        let resp = dispatch_gen_text(settings, direct).await?;
+        let (mime, body) = image::extract_image_response(&resp)?;
+        let preview = image::preview_html(&body, &mime);
+        emit_progress(app, "rendering", 1, 1, &preview);
+        let caption = image::derive_caption(source);
+        return Ok(image::GeneratedImage { body, mime_type: mime, caption });
+    }
+
     let caption = image::derive_caption(&composition);
 
-    // 2. Initial render (Sonnet text).
+    // 2. Initial render (image-gen model text).
     let mut pass: usize = 1;
     emit_progress(app, "rendering", pass, max, "");
     let init_messages = diagram::build_initial_render_messages(&composition);
-    let resp = dispatch_image_text(settings, llm::CLAUDE_SONNET_MODEL, init_messages).await?;
-    let mut svg = image::extract_svg(&resp)?;
-    emit_progress(app, "rendering", pass, max, &svg);
+    let resp = dispatch_gen_text(settings, init_messages).await?;
+    let (mut mime, mut body) = image::extract_image_response(&resp)?;
+    emit_progress(app, "rendering", pass, max, &image::preview_html(&body, &mime));
 
-    // 3. Evaluate-and-improve loop (Haiku judges, Sonnet redraws).
+    // 3. Evaluate-and-improve loop (Haiku judges, image-gen model redraws).
     for _ in 0..diagram::MAX_ITERATIONS {
-        emit_progress(app, "critique", pass, max, &svg);
+        let preview = image::preview_html(&body, &mime);
+        emit_progress(app, "critique", pass, max, &preview);
 
-        let png = match image::rasterize_svg_to_png(&svg) {
+        let png = match image::to_png_bytes(&body, &mime) {
             Ok(p) => p,
             Err(e) => {
-                eprintln!("diagram pipeline: rasterize failed, stopping: {e}");
+                eprintln!("diagram pipeline: to_png failed, stopping: {e}");
                 break;
             }
         };
@@ -311,16 +396,22 @@ async fn run_diagram_pipeline(
         }
 
         pass += 1;
-        emit_progress(app, "rendering", pass, max, &svg);
-        let improve_messages = diagram::build_improve_messages(&composition, &svg, &score);
-        match dispatch_image_text(settings, llm::CLAUDE_SONNET_MODEL, improve_messages).await {
-            Ok(resp) => match image::extract_svg(&resp) {
-                Ok(next) => {
-                    svg = next.clone();
-                    emit_progress(app, "rendering", pass, max, &svg);
+        emit_progress(app, "rendering", pass, max, &image::preview_html(&body, &mime));
+        // Improve prompt expects SVG; if we have raster only, skip improve.
+        if mime != "image/svg+xml" {
+            eprintln!("diagram pipeline: improve step skipped (model returned raster, not SVG)");
+            break;
+        }
+        let improve_messages = diagram::build_improve_messages(&composition, &body, &score);
+        match dispatch_gen_text(settings, improve_messages).await {
+            Ok(resp) => match image::extract_image_response(&resp) {
+                Ok((new_mime, new_body)) => {
+                    mime = new_mime;
+                    body = new_body;
+                    emit_progress(app, "rendering", pass, max, &image::preview_html(&body, &mime));
                 }
                 Err(e) => {
-                    eprintln!("diagram pipeline: improve returned no <svg>, keeping current: {e}");
+                    eprintln!("diagram pipeline: improve returned no image, keeping current: {e}");
                     break;
                 }
             },
@@ -331,7 +422,7 @@ async fn run_diagram_pipeline(
         }
     }
 
-    Ok(image::GeneratedImage { svg, caption })
+    Ok(image::GeneratedImage { body, mime_type: mime, caption })
 }
 
 // ── Settings ─────────────────────────────────────────────────────────────────
@@ -347,6 +438,9 @@ pub struct SettingsUpdate {
     provider: String,
     ollama_url: String,
     ollama_model: String,
+    image_provider: String,
+    claude_image_model: String,
+    ollama_image_model: String,
     image_quality: String,
     /// Some(non-empty) sets the key; None leaves it unchanged.
     #[serde(default)]
@@ -367,6 +461,11 @@ fn update_settings(
         "ollama" => LlmProvider::Ollama,
         other => return Err(format!("unknown provider: {other}")),
     };
+    let image_provider = match update.image_provider.as_str() {
+        "claude" => LlmProvider::Claude,
+        "ollama" => LlmProvider::Ollama,
+        other => return Err(format!("unknown image provider: {other}")),
+    };
     let image_quality = match update.image_quality.as_str() {
         "fast" => ImageQuality::Fast,
         "medium" => ImageQuality::Medium,
@@ -378,6 +477,9 @@ fn update_settings(
     settings.provider = provider;
     settings.ollama_url = update.ollama_url;
     settings.ollama_model = update.ollama_model;
+    settings.image_provider = image_provider;
+    settings.claude_image_model = update.claude_image_model;
+    settings.ollama_image_model = update.ollama_image_model;
     settings.image_quality = image_quality;
 
     if update.clear_claude_key {
@@ -754,7 +856,7 @@ async fn add_image(
     let settings = state.settings.lock().unwrap().clone();
     let generated =
         run_image_pipeline(&app, &settings, &selection_text, &context, None).await?;
-    let aspect = image::aspect_ratio_of(&generated.svg);
+    let aspect = image::aspect_ratio_for(&generated.body, &generated.mime_type);
 
     let chapter_path = chapter_path_for(&state, &chapter_id)?;
     let raw_file = std::fs::read_to_string(&chapter_path)
@@ -763,7 +865,8 @@ async fn add_image(
         &raw_file,
         src_start,
         src_end,
-        &generated.svg,
+        &generated.body,
+        &generated.mime_type,
         &generated.caption,
         aspect,
         "image",
@@ -812,7 +915,7 @@ async fn add_diagram(
         original_prompt,
     )
     .await?;
-    let aspect = image::aspect_ratio_of(&generated.svg);
+    let aspect = image::aspect_ratio_for(&generated.body, &generated.mime_type);
 
     let chapter_path = chapter_path_for(&state, &chapter_id)?;
     let raw_file = std::fs::read_to_string(&chapter_path)
@@ -821,7 +924,8 @@ async fn add_diagram(
         &raw_file,
         src_start,
         src_end,
-        &generated.svg,
+        &generated.body,
+        &generated.mime_type,
         &generated.caption,
         aspect,
         "diagram",
@@ -884,12 +988,13 @@ async fn regenerate_artifact(
     } else {
         run_image_pipeline(&app, &settings, &source, &context, Some(&instruction)).await?
     };
-    let new_aspect = image::aspect_ratio_of(&generated.svg);
+    let new_aspect = image::aspect_ratio_for(&generated.body, &generated.mime_type);
 
     let (new_raw, _) = edupage::regenerate_artifact(
         &raw_file,
         artifact_id,
-        &generated.svg,
+        &generated.body,
+        &generated.mime_type,
         &generated.caption,
         new_aspect,
     )?;

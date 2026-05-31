@@ -9,6 +9,9 @@ interface PublicSettings {
   claudeConfigured: boolean;
   ollamaUrl: string;
   ollamaModel: string;
+  imageProvider: Provider;
+  claudeImageModel: string;
+  ollamaImageModel: string;
   imageQuality: ImageQuality;
 }
 
@@ -22,6 +25,9 @@ export default function SettingsModal(props: Props) {
   const [claudeKey, setClaudeKey] = createSignal("");
   const [ollamaUrl, setOllamaUrl] = createSignal("");
   const [ollamaModel, setOllamaModel] = createSignal("");
+  const [imageProvider, setImageProvider] = createSignal<Provider>("ollama");
+  const [claudeImageModel, setClaudeImageModel] = createSignal("claude-sonnet-4-6");
+  const [ollamaImageModel, setOllamaImageModel] = createSignal("llama3.2");
   const [imageQuality, setImageQuality] = createSignal<ImageQuality>("medium");
   const [saving, setSaving] = createSignal(false);
   const [error, setError] = createSignal("");
@@ -33,6 +39,9 @@ export default function SettingsModal(props: Props) {
       setClaudeConfigured(s.claudeConfigured);
       setOllamaUrl(s.ollamaUrl);
       setOllamaModel(s.ollamaModel);
+      setImageProvider(s.imageProvider);
+      setClaudeImageModel(s.claudeImageModel);
+      setOllamaImageModel(s.ollamaImageModel);
       setImageQuality(s.imageQuality);
     } catch (e) {
       setError(String(e));
@@ -44,6 +53,9 @@ export default function SettingsModal(props: Props) {
       provider: provider(),
       ollamaUrl: ollamaUrl(),
       ollamaModel: ollamaModel(),
+      imageProvider: imageProvider(),
+      claudeImageModel: claudeImageModel(),
+      ollamaImageModel: ollamaImageModel(),
       imageQuality: imageQuality(),
     };
   }
@@ -161,6 +173,41 @@ export default function SettingsModal(props: Props) {
                 onInput={(e) => setOllamaModel(e.currentTarget.value)}
               />
             </label>
+          </fieldset>
+
+          <fieldset class="settings-group">
+            <legend>Image generation</legend>
+            <label class="settings-field">
+              <span class="settings-label">Provider</span>
+              <select
+                value={imageProvider()}
+                onChange={(e) => setImageProvider(e.currentTarget.value as Provider)}
+              >
+                <option value="claude">Claude</option>
+                <option value="ollama">Ollama</option>
+              </select>
+            </label>
+            <Show when={imageProvider() === "claude"}>
+              <label class="settings-field">
+                <span class="settings-label">Model</span>
+                <input
+                  type="text"
+                  placeholder="claude-sonnet-4-6"
+                  value={claudeImageModel()}
+                  onInput={(e) => setClaudeImageModel(e.currentTarget.value)}
+                />
+              </label>
+            </Show>
+            <Show when={imageProvider() === "ollama"}>
+              <label class="settings-field">
+                <span class="settings-label">Model</span>
+                <input
+                  type="text"
+                  value={ollamaImageModel()}
+                  onInput={(e) => setOllamaImageModel(e.currentTarget.value)}
+                />
+              </label>
+            </Show>
           </fieldset>
 
           <label class="settings-field">

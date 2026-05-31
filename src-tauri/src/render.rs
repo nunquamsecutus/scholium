@@ -265,23 +265,35 @@ fn clean_svg(svg: &str) -> String {
 /// Inline an artifact as a `<figure data-src-skip …>`.
 ///
 /// The figure carries `data-src-skip` because the image is not selectable body
-/// text.  The SVG body is sanitized with `clean_svg` before inlining — this
-/// allows standard SVG elements while blocking `<script>` tags and `on*`
-/// event-handler attributes.
+/// text.
+///
+/// * **SVG** artifacts: the body is sanitized with `clean_svg` (allows all
+///   standard SVG elements, strips `<script>` and `on*` handlers) and inlined
+///   directly into the HTML.
+/// * **Raster** artifacts (`image/png`, `image/jpeg`, …): the base64 body is
+///   rendered as an `<img src="data:…">` tag so no external file is needed.
 fn figure_for(artifact: &ArtifactWithBody) -> String {
     let cls = if artifact.aspect_ratio >= 1.0 {
         "artifact artifact-block"
     } else {
         "artifact artifact-float"
     };
-    let safe_svg = clean_svg(&artifact.body);
+    let content = if artifact.mime_type == "image/svg+xml" {
+        clean_svg(&artifact.body)
+    } else {
+        let alt = html_escape(artifact.caption.as_deref().unwrap_or(""));
+        format!(
+            r#"<img src="data:{};base64,{}" alt="{}" style="max-width:100%;height:auto;"/>"#,
+            artifact.mime_type, artifact.body, alt,
+        )
+    };
     let caption = artifact
         .caption
         .as_deref()
         .map(|c| format!("<figcaption>{}</figcaption>", html_escape(c)))
         .unwrap_or_default();
     format!(
-        r#"<figure data-src-skip class="{cls}" data-artifact-id="{id}">{safe_svg}{caption}</figure>"#,
+        r#"<figure data-src-skip class="{cls}" data-artifact-id="{id}">{content}{caption}</figure>"#,
         id = artifact.id,
     )
 }
@@ -715,6 +727,27 @@ mod tests {
         assert!(html.contains("<svg"), "figure must contain <svg>: {html}");
         assert!(html.contains("<circle"), "figure must contain <circle>: {html}");
         assert!(html.contains("Test diagram"), "figure must contain caption: {html}");
+        assert!(html.contains("data-src-skip"), "figure must carry data-src-skip: {html}");
+    }
+
+    #[test]
+    fn artifact_figure_renders_raster_as_img_tag() {
+        use crate::edupage::ArtifactWithBody;
+        let art = ArtifactWithBody {
+            id: 2,
+            mime_type: "image/png".into(),
+            semantic_type: "image".into(),
+            ctime: "2026-01-01T00:00:00Z".into(),
+            caption: Some("A photo".into()),
+            aspect_ratio: 1.78,
+            source: "the star".into(),
+            body: "iVBORfakebase64==".into(),
+        };
+        let html = figure_for(&art);
+        assert!(html.contains(r#"src="data:image/png;base64,iVBORfakebase64=="#), "img src must be a data URL: {html}");
+        assert!(html.contains("<img"), "must use img tag for raster: {html}");
+        assert!(!html.contains("<svg"), "must not emit svg tag for raster: {html}");
+        assert!(html.contains("A photo"), "caption must appear: {html}");
         assert!(html.contains("data-src-skip"), "figure must carry data-src-skip: {html}");
     }
 }

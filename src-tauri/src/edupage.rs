@@ -508,7 +508,8 @@ pub fn delete_artifact(raw: &str, artifact_id: u32) -> Result<String, String> {
 pub fn regenerate_artifact(
     raw: &str,
     artifact_id: u32,
-    new_svg: &str,
+    new_body: &str,
+    new_mime_type: &str,
     new_caption: &str,
     new_aspect: f32,
 ) -> Result<(String, ArtifactMeta), String> {
@@ -523,6 +524,7 @@ pub fn regenerate_artifact(
     let now = chrono::Utc::now().to_rfc3339();
 
     header.artifacts[idx].aspect_ratio = new_aspect;
+    header.artifacts[idx].mime_type = new_mime_type.to_string();
     header.artifacts[idx].caption = if new_caption.trim().is_empty() {
         None
     } else {
@@ -598,10 +600,10 @@ pub fn regenerate_artifact(
             raw_lines.len()
         };
         if key == &artifact_key {
-            // Keep the delimiter line, swap the block body for the new SVG.
+            // Keep the delimiter line, swap the block body for the new content.
             new_file.push_str(raw_lines[start]);
             new_file.push('\n');
-            new_file.push_str(new_svg);
+            new_file.push_str(new_body);
             new_file.push('\n');
         } else {
             new_file.push_str(&raw_lines[start..end].join("\n"));
@@ -959,7 +961,8 @@ pub fn add_artifact_at(
     raw: &str,
     src_start: usize,
     src_end: usize,
-    svg: &str,
+    body: &str,
+    mime_type: &str,
     caption: &str,
     aspect_ratio: f32,
     semantic_type: &str,
@@ -1026,7 +1029,7 @@ pub fn add_artifact_at(
 
     let artifact = ArtifactMeta {
         id: artifact_id,
-        mime_type: "image/svg+xml".to_string(),
+        mime_type: mime_type.to_string(),
         semantic_type: semantic_type.to_string(),
         ctime: now,
         caption: if caption.trim().is_empty() {
@@ -1057,7 +1060,7 @@ pub fn add_artifact_at(
     new_file.push('\n');
     new_file.push_str(&artifact_delimiter(&file_id, artifact_id));
     new_file.push('\n');
-    new_file.push_str(svg);
+    new_file.push_str(body);
 
     Ok((new_file, artifact))
 }
@@ -1814,7 +1817,7 @@ mod tests {
         let raw = create("ch-01", "Chapter", None, "The collapse is shown here.");
         let (raw, _) = add_artifact(&raw, "collapse", 1, SVG, "cap", 2.0, "image").unwrap();
         let new_svg = r#"<svg viewBox="0 0 100 40"><circle/></svg>"#;
-        let (raw, meta) = regenerate_artifact(&raw, 1, new_svg, "new cap", 2.5).unwrap();
+        let (raw, meta) = regenerate_artifact(&raw, 1, new_svg, "image/svg+xml", "new cap", 2.5).unwrap();
         assert_eq!(meta.aspect_ratio, 2.5);
         let page = read(&raw).unwrap();
         assert_eq!(page.artifacts[0].body, new_svg);
@@ -1827,7 +1830,7 @@ mod tests {
     fn regenerate_artifact_moves_block_to_inline_when_now_tall() {
         let raw = create("ch-01", "Chapter", None, "The collapse is shown here.");
         let (raw, _) = add_artifact(&raw, "collapse", 1, SVG, "cap", 2.0, "image").unwrap();
-        let (raw, _) = regenerate_artifact(&raw, 1, SVG, "tall", 0.5).unwrap();
+        let (raw, _) = regenerate_artifact(&raw, 1, SVG, "image/svg+xml", "tall", 0.5).unwrap();
         let page = read(&raw).unwrap();
         assert_eq!(page.artifacts[0].aspect_ratio, 0.5);
         assert_eq!(page.content, "The collapse is shown here. ![tall](epar://1)");
@@ -1837,7 +1840,7 @@ mod tests {
     fn regenerate_artifact_moves_inline_to_block_when_now_wide() {
         let raw = create("ch-01", "Chapter", None, "The collapse is shown here.");
         let (raw, _) = add_artifact(&raw, "collapse", 1, SVG, "cap", 0.5, "image").unwrap();
-        let (raw, _) = regenerate_artifact(&raw, 1, SVG, "wide", 2.0).unwrap();
+        let (raw, _) = regenerate_artifact(&raw, 1, SVG, "image/svg+xml", "wide", 2.0).unwrap();
         let page = read(&raw).unwrap();
         assert_eq!(page.artifacts[0].aspect_ratio, 2.0);
         assert_eq!(page.content, "The collapse is shown here.\n\n![wide](epar://1)");
@@ -1846,7 +1849,7 @@ mod tests {
     #[test]
     fn regenerate_artifact_errors_for_unknown_id() {
         let raw = create("ch-01", "Chapter", None, "Nothing here.");
-        assert!(regenerate_artifact(&raw, 99, SVG, "x", 1.0).is_err());
+        assert!(regenerate_artifact(&raw, 99, SVG, "image/svg+xml", "x", 1.0).is_err());
     }
 
     #[test]
