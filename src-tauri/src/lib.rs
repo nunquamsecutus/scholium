@@ -1409,6 +1409,279 @@ fn load_book(
     Ok(book)
 }
 
+// ── Book chat ─────────────────────────────────────────────────────────────────
+
+/// One message in the chat history as seen by the frontend.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ChatMessage {
+    pub role: String,
+    pub content: String,
+}
+
+/// What the backend returns for each chat turn.
+#[derive(Debug, serde::Serialize)]
+pub struct ChatReply {
+    /// The assistant's reply text (may contain a ```json patch block).
+    pub reply: String,
+    /// If the reply contained a parseable patch block, the parsed action is
+    /// echoed back here so the frontend can inspect it without re-parsing.
+    pub patch: Option<ManifestPatch>,
+}
+
+/// A structured action the AI can propose for the book.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum ManifestPatch {
+    RenameChapter { id: String, title: String },
+    ReorderChapters { ids: Vec<String> },
+    AddChapter { after_id: Option<String>, id: String, title: String, description: Option<String> },
+    RemoveChapter { id: String },
+    MergeChapters { source_id: String, target_id: String, title: String },
+    SplitChapter { id: String, new_chapters: Vec<NewChapterSpec> },
+    UpdateMetadata { title: Option<String>, subtitle: Option<String>, description: Option<String> },
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct NewChapterSpec {
+    pub id: String,
+    pub title: String,
+    pub description: Option<String>,
+}
+
+/// Build the system prompt for the book chat, giving the AI full context.
+fn chat_system_prompt(book: &manifest::Manifest) -> String {
+    let chapters: Vec<String> = book
+        .lesson_plan
+        .chapters
+        .iter()
+        .enumerate()
+        .map(|(i, ch)| {
+            let desc = ch
+                .description
+                .as_deref()
+                .map(|d| format!(" — {d}"))
+                .unwrap_or_default();
+            let status = match ch.status {
+                manifest::ChapterStatus::Planned => "planned",
+                manifest::ChapterStatus::Generating => "generating",
+                manifest::ChapterStatus::Generated => "generated",
+            };
+            format!("  {}. [{}] {} ({}){}", i + 1, ch.id, ch.title, status, desc)
+        })
+        .collect();
+
+    format!(
+        r#"You are a helpful assistant for an interactive educational book.
+
+Book: {title}
+Topic: {topic}
+{subtitle_line}Summary: {summary}
+
+Chapters:
+{chapter_list}
+
+You can chat freely to help the reader understand the content, or you can propose
+structural changes to the book. When you want to propose a change, include a JSON
+block anywhere in your reply using this format:
+
+```json
+{{ "action": "<action_name>", ... }}
+```
+
+Supported actions and their fields:
+- rename_chapter:   {{ "action": "rename_chapter",   "id": "ch-01", "title": "New Title" }}
+- reorder_chapters: {{ "action": "reorder_chapters",  "ids": ["ch-02", "ch-01", "ch-03"] }}
+- add_chapter:      {{ "action": "add_chapter",       "after_id": "ch-01" | null, "id": "ch-new", "title": "…", "description": "…" | null }}
+- remove_chapter:   {{ "action": "remove_chapter",    "id": "ch-01" }}
+- merge_chapters:   {{ "action": "merge_chapters",    "source_id": "ch-02", "target_id": "ch-01", "title": "Merged Title" }}
+- split_chapter:    {{ "action": "split_chapter",     "id": "ch-01", "new_chapters": [{{"id":"ch-01a","title":"…","description":null}}] }}
+- update_metadata:  {{ "action": "update_metadata",   "title": "…" | null, "subtitle": "…" | null, "description": "…" | null }}
+
+Only include a JSON block when you are actively proposing a change. The user will
+be shown the proposed change and can accept or reject it before anything is applied.
+Omit the block for informational replies."#,
+        title = book.metadata.title,
+        topic = book.metadata.topic,
+        subtitle_line = book
+            .metadata
+            .subtitle
+            .as_deref()
+            .map(|s| format!("Subtitle: {s}\n"))
+            .unwrap_or_default(),
+        summary = book.lesson_plan.summary,
+        chapter_list = chapters.join("\n"),
+    )
+}
+
+/// Extract the first ```json ... ``` block from the assistant reply and try to
+/// parse it as a ManifestPatch.
+fn extract_patch(reply: &str) -> Option<ManifestPatch> {
+    let start = reply.find("```json")?;
+    let after = &reply[start + 7..];
+    let end = after.find("```")?;
+    let json_str = after[..end].trim();
+    serde_json::from_str(json_str).ok()
+}
+
+#[tauri::command]
+async fn chat_about_book(
+    state: tauri::State<'_, AppState>,
+    history: Vec<ChatMessage>,
+) -> Result<ChatReply, String> {
+    let settings = state.settings.lock().unwrap().clone();
+    let book_path = state
+        .book_path
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("No book is open")?;
+    let book = manifest::load(&book_path)?;
+    let system_prompt = chat_system_prompt(&book);
+
+    // Build the full message list: system + conversation history.
+    let mut messages = vec![llm::LlmMessage {
+        role: "system".to_string(),
+        content: system_prompt,
+    }];
+    for msg in history {
+        messages.push(llm::LlmMessage { role: msg.role, content: msg.content });
+    }
+
+    let reply = dispatch_llm(&settings, messages).await?;
+    let patch = extract_patch(&reply);
+    Ok(ChatReply { reply, patch })
+}
+
+#[tauri::command]
+fn apply_manifest_patch(
+    state: tauri::State<'_, AppState>,
+    patch: ManifestPatch,
+) -> Result<manifest::Manifest, String> {
+    let book_path = state
+        .book_path
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("No book is open")?;
+    let mut book = manifest::load(&book_path)?;
+
+    match patch {
+        ManifestPatch::RenameChapter { id, title } => {
+            let ch = book
+                .lesson_plan
+                .chapters
+                .iter_mut()
+                .find(|c| c.id == id)
+                .ok_or_else(|| format!("chapter '{id}' not found"))?;
+            ch.title = title;
+        }
+
+        ManifestPatch::ReorderChapters { ids } => {
+            let mut reordered: Vec<manifest::Chapter> = Vec::with_capacity(ids.len());
+            for id in &ids {
+                let pos = book
+                    .lesson_plan
+                    .chapters
+                    .iter()
+                    .position(|c| &c.id == id)
+                    .ok_or_else(|| format!("chapter '{id}' not found"))?;
+                reordered.push(book.lesson_plan.chapters[pos].clone());
+            }
+            book.lesson_plan.chapters = reordered;
+        }
+
+        ManifestPatch::AddChapter { after_id, id, title, description } => {
+            let new_ch = manifest::Chapter {
+                id,
+                title,
+                description,
+                file: String::new(), // placeholder; generation will fill this
+                status: manifest::ChapterStatus::Planned,
+            };
+            match after_id {
+                None => book.lesson_plan.chapters.insert(0, new_ch),
+                Some(aid) => {
+                    let pos = book
+                        .lesson_plan
+                        .chapters
+                        .iter()
+                        .position(|c| c.id == aid)
+                        .ok_or_else(|| format!("chapter '{aid}' not found"))?;
+                    book.lesson_plan.chapters.insert(pos + 1, new_ch);
+                }
+            }
+        }
+
+        ManifestPatch::RemoveChapter { id } => {
+            let pos = book
+                .lesson_plan
+                .chapters
+                .iter()
+                .position(|c| c.id == id)
+                .ok_or_else(|| format!("chapter '{id}' not found"))?;
+            book.lesson_plan.chapters.remove(pos);
+        }
+
+        ManifestPatch::MergeChapters { source_id, target_id, title } => {
+            // Remove source; rename target to the merged title.
+            let src_pos = book
+                .lesson_plan
+                .chapters
+                .iter()
+                .position(|c| c.id == source_id)
+                .ok_or_else(|| format!("chapter '{source_id}' not found"))?;
+            book.lesson_plan.chapters.remove(src_pos);
+            let tgt = book
+                .lesson_plan
+                .chapters
+                .iter_mut()
+                .find(|c| c.id == target_id)
+                .ok_or_else(|| format!("chapter '{target_id}' not found"))?;
+            tgt.title = title;
+            tgt.status = manifest::ChapterStatus::Planned; // needs regeneration
+        }
+
+        ManifestPatch::SplitChapter { id, new_chapters } => {
+            let pos = book
+                .lesson_plan
+                .chapters
+                .iter()
+                .position(|c| c.id == id)
+                .ok_or_else(|| format!("chapter '{id}' not found"))?;
+            book.lesson_plan.chapters.remove(pos);
+            for (i, spec) in new_chapters.into_iter().enumerate() {
+                book.lesson_plan.chapters.insert(
+                    pos + i,
+                    manifest::Chapter {
+                        id: spec.id,
+                        title: spec.title,
+                        description: spec.description,
+                        file: String::new(),
+                        status: manifest::ChapterStatus::Planned,
+                    },
+                );
+            }
+        }
+
+        ManifestPatch::UpdateMetadata { title, subtitle, description } => {
+            if let Some(t) = title {
+                book.metadata.title = t;
+            }
+            if let Some(s) = subtitle {
+                book.metadata.subtitle = Some(s);
+            }
+            if let Some(d) = description {
+                book.metadata.description = Some(d);
+            }
+        }
+    }
+
+    // Stamp modified timestamp.
+    book.metadata.modified = chrono::Utc::now().to_rfc3339();
+    manifest::save(&book, &book_path)?;
+    Ok(book)
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 fn title_case(s: &str) -> String {
@@ -1492,18 +1765,23 @@ pub fn run() {
         })
         .menu(|handle| {
             // Preserve the platform default menu (Edit copy/paste, etc.) and
-            // add a Settings… item to the app submenu (⌘, on macOS).
+            // add Settings… and Chat… items to the app submenu.
             let settings_item =
                 MenuItem::with_id(handle, "settings", "Settings…", true, Some("CmdOrCtrl+,"))?;
+            let chat_item =
+                MenuItem::with_id(handle, "chat", "Chat…", true, Some("CmdOrCtrl+K"))?;
             let menu = Menu::default(handle)?;
             if let Some(MenuItemKind::Submenu(app_menu)) = menu.items()?.into_iter().next() {
                 app_menu.insert(&settings_item, 1)?;
+                app_menu.insert(&chat_item, 2)?;
             }
             Ok(menu)
         })
         .on_menu_event(|app, event| {
-            if event.id().0 == "settings" {
-                let _ = app.emit("open-settings", ());
+            match event.id().0.as_str() {
+                "settings" => { let _ = app.emit("open-settings", ()); }
+                "chat" => { let _ = app.emit("open-chat", ()); }
+                _ => {}
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -1532,6 +1810,8 @@ pub fn run() {
             add_diagram,
             delete_artifact,
             regenerate_artifact,
+            chat_about_book,
+            apply_manifest_patch,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
