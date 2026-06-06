@@ -4,6 +4,7 @@ import { selectedSingleWord, selectedPhrase, selectionTouchesRewrite } from "../
 interface Props {
   container: () => HTMLElement | undefined;
   onDefine?: (word: string, range: Range) => void;
+  onReadFromHere?: (word: string, range: Range) => void;
   onFootnote?: (phrase: string, range: Range) => void;
   onEndnote?: (phrase: string, range: Range) => void;
   onAppendix?: (phrase: string, range: Range) => void;
@@ -80,6 +81,13 @@ export default function SelectionToolbar(props: Props) {
     const r = range();
     if (!w || !r) return;
     props.onDefine?.(w, r);
+  }
+
+  function readFromHere() {
+    const w = word();
+    const r = range();
+    if (!w || !r) return;
+    props.onReadFromHere?.(w, r);
   }
 
   function footnote() {
@@ -160,6 +168,11 @@ export default function SelectionToolbar(props: Props) {
             <button type="button" class="selection-action" onClick={define}>
               Define
             </button>
+            <Show when={props.onReadFromHere}>
+              <button type="button" class="selection-action" onClick={readFromHere}>
+                Read from here
+              </button>
+            </Show>
           </Show>
           <Show when={phrase()}>
             <button

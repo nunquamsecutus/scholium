@@ -296,4 +296,39 @@ describe("SelectionToolbar", () => {
     expect(phrase).toBe("hello world");
     expect(range).toBeInstanceOf(Range);
   });
+
+  it("shows Read from here for single-word selection when onReadFromHere is provided", async () => {
+    const onReadFromHere = vi.fn();
+    const article = mountArticle();
+    const { findByRole } = render(() => (
+      <SelectionToolbar container={() => article} onReadFromHere={onReadFromHere} />
+    ));
+    selectInside(article, 0, 5); // "hello" — single word
+    expect(await findByRole("button", { name: "Read from here" })).toBeInTheDocument();
+  });
+
+  it("does not show Read from here when onReadFromHere is not provided", async () => {
+    const article = mountArticle();
+    const { findByRole, queryByRole } = render(() => (
+      <SelectionToolbar container={() => article} />
+    ));
+    selectInside(article, 0, 5);
+    await findByRole("button", { name: "Define" }); // wait for toolbar to appear
+    expect(queryByRole("button", { name: "Read from here" })).not.toBeInTheDocument();
+  });
+
+  it("calls onReadFromHere with the word and Range when clicked", async () => {
+    const onReadFromHere = vi.fn();
+    const article = mountArticle();
+    const { findByRole } = render(() => (
+      <SelectionToolbar container={() => article} onReadFromHere={onReadFromHere} />
+    ));
+    selectInside(article, 0, 5);
+    fireEvent.click(await findByRole("button", { name: "Read from here" }));
+
+    expect(onReadFromHere).toHaveBeenCalledTimes(1);
+    const [word, range] = onReadFromHere.mock.calls[0];
+    expect(word).toBe("hello");
+    expect(range).toBeInstanceOf(Range);
+  });
 });

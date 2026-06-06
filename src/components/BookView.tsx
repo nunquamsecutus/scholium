@@ -5,6 +5,7 @@ import type { Chapter, Manifest } from "../types/manifest";
 import SelectionToolbar from "./SelectionToolbar";
 import BookLoader from "./BookLoader";
 import { resolveSourceRange } from "../lib/selection";
+import { speakText, stopSpeaking } from "../utils/tts";
 
 // Pagination unit comes from the article's clientWidth at runtime — see the
 // page-window / chapter-content split in App.css. The browser fits one column
@@ -280,6 +281,15 @@ export default function BookView(props: Props) {
     });
   });
 
+  // "Read Aloud" menu item (⌘⇧R) reads the current chapter from the beginning.
+  onMount(() => {
+    const unlisten = listen("start-reading", () => handleReadFromBeginning());
+    onCleanup(() => unlisten.then((un) => un()));
+  });
+
+  // Stop TTS when BookView is unmounted (e.g. user returns to the welcome screen).
+  onCleanup(() => void stopSpeaking());
+
   function jumpToEndnote(noteId: number) {
     const article = articleRef();
     if (!article) return;
@@ -419,6 +429,7 @@ export default function BookView(props: Props) {
   }
 
   async function selectChapter(ch: Chapter) {
+    void stopSpeaking();
     setError("");
     setSelectedId(ch.id);
     setCurrentPage(0);
@@ -619,6 +630,23 @@ export default function BookView(props: Props) {
     props.onOpenChat?.(phrase, context);
   }
 
+  function handleReadFromBeginning() {
+    const container = articleRef();
+    if (!container) return;
+    void speakText(container.textContent ?? "");
+  }
+
+  function handleReadFromHere(_word: string, range: Range) {
+    const container = articleRef();
+    if (!container) return;
+    // Build a range from the selection start to the end of the article so the
+    // user hears everything from the tapped word onwards.
+    const readRange = document.createRange();
+    readRange.selectNodeContents(container);
+    readRange.setStart(range.startContainer, range.startOffset);
+    void speakText(readRange.toString());
+  }
+
   async function handleDrawPicture(phrase: string, range: Range) {
     const r = resolvePhrase(phrase, range);
     if (!r) return;
@@ -813,6 +841,7 @@ export default function BookView(props: Props) {
         <SelectionToolbar
           container={articleRef}
           onDefine={handleDefine}
+          onReadFromHere={handleReadFromHere}
           onFootnote={handleFootnote}
           onEndnote={handleEndnote}
           onAppendix={handleAppendix}

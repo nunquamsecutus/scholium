@@ -21,6 +21,9 @@ use tauri_plugin_cli::CliExt;
 pub struct AppState {
     pub settings: std::sync::Mutex<Settings>,
     pub book_path: std::sync::Mutex<Option<std::path::PathBuf>>,
+    /// Handle to the `say` child process while it is speaking (macOS only).
+    /// Wrapped in a Mutex so it can be killed from any command.
+    pub say_process: std::sync::Mutex<Option<std::process::Child>>,
 }
 
 // ── Shared LLM dispatch ──────────────────────────────────────────────────────
@@ -1694,6 +1697,70 @@ fn apply_manifest_patch(
     Ok(book)
 }
 
+// ── Text-to-speech ────────────────────────────────────────────────────────────
+
+/// Speak `text` aloud.
+///
+/// On macOS the system `say` command is used (piping text via stdin so there
+/// is no argument-length limit).  Any previously-running `say` process is
+/// killed first, making this safe to call repeatedly.
+///
+/// On other platforms this command returns `Err("platform_not_supported")` so
+/// the frontend can fall back to the Web Speech API.
+#[tauri::command]
+fn speak_text(state: tauri::State<'_, AppState>, text: String) -> Result<(), String> {
+    // Kill any in-progress say process (no-op on non-macOS where the mutex is
+    // always None).
+    {
+        let mut lock = state.say_process.lock().map_err(|e| e.to_string())?;
+        if let Some(mut child) = lock.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = text;
+        return Err("platform_not_supported".to_string());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        use std::io::Write;
+        let mut child = std::process::Command::new("say")
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("failed to start say: {e}"))?;
+
+        // Write text to `say`'s stdin in a background thread so this command
+        // returns immediately.  When the thread finishes writing, the pipe is
+        // closed and `say` knows it has received all input.
+        if let Some(mut stdin) = child.stdin.take() {
+            let bytes = text.into_bytes();
+            std::thread::spawn(move || {
+                let _ = stdin.write_all(&bytes);
+            });
+        }
+
+        *state.say_process.lock().map_err(|e| e.to_string())? = Some(child);
+        Ok(())
+    }
+}
+
+/// Stop any in-progress speech started by `speak_text`.
+/// On non-macOS this is a no-op (the frontend's Web Speech cancel is handled
+/// client-side).
+#[tauri::command]
+fn stop_speaking(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let mut lock = state.say_process.lock().map_err(|e| e.to_string())?;
+    if let Some(mut child) = lock.take() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    Ok(())
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 fn title_case(s: &str) -> String {
@@ -1771,6 +1838,7 @@ pub fn run() {
             app.manage(AppState {
                 settings: std::sync::Mutex::new(settings),
                 book_path: std::sync::Mutex::new(None),
+                say_process: std::sync::Mutex::new(None),
             });
 
             Ok(())
@@ -1782,10 +1850,13 @@ pub fn run() {
                 MenuItem::with_id(handle, "settings", "Settings…", true, Some("CmdOrCtrl+,"))?;
             let chat_item =
                 MenuItem::with_id(handle, "chat", "Chat…", true, Some("CmdOrCtrl+K"))?;
+            let read_item =
+                MenuItem::with_id(handle, "read-aloud", "Read Aloud", true, Some("CmdOrCtrl+Shift+R"))?;
             let menu = Menu::default(handle)?;
             if let Some(MenuItemKind::Submenu(app_menu)) = menu.items()?.into_iter().next() {
                 app_menu.insert(&settings_item, 1)?;
                 app_menu.insert(&chat_item, 2)?;
+                app_menu.insert(&read_item, 3)?;
             }
             Ok(menu)
         })
@@ -1793,6 +1864,7 @@ pub fn run() {
             match event.id().0.as_str() {
                 "settings" => { let _ = app.emit("open-settings", ()); }
                 "chat" => { let _ = app.emit("open-chat", ()); }
+                "read-aloud" => { let _ = app.emit("start-reading", ()); }
                 _ => {}
             }
         })
@@ -1824,6 +1896,8 @@ pub fn run() {
             regenerate_artifact,
             chat_about_book,
             apply_manifest_patch,
+            speak_text,
+            stop_speaking,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
