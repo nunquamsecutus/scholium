@@ -11,6 +11,7 @@ interface Props {
   onRewriteConversation?: (rewriteId: number, range: Range) => void;
   onDrawPicture?: (phrase: string, range: Range) => void;
   onDrawDiagram?: (phrase: string, range: Range) => void;
+  onChat?: (phrase: string, range: Range) => void;
 }
 
 type Mode = "primary" | "expand";
@@ -128,6 +129,13 @@ export default function SelectionToolbar(props: Props) {
     props.onDrawDiagram?.(p, r);
   }
 
+  function chat() {
+    const p = phrase();
+    const r = range();
+    if (!p || !r) return;
+    props.onChat?.(p, r);
+  }
+
   onMount(() => {
     document.addEventListener("selectionchange", update);
     onCleanup(() => document.removeEventListener("selectionchange", update));
@@ -170,6 +178,11 @@ export default function SelectionToolbar(props: Props) {
             <button type="button" class="selection-action" onClick={drawDiagram}>
               Diagram
             </button>
+            <Show when={props.onChat}>
+              <button type="button" class="selection-action" onClick={chat}>
+                Chat
+              </button>
+            </Show>
           </Show>
         </Show>
         <Show when={mode() === "expand"}>

@@ -65,6 +65,8 @@ interface RewriteDialogState {
 
 interface Props {
   manifest: Manifest;
+  /** Called when the user selects text and clicks "Chat". */
+  onOpenChat?: (phrase: string, context: string) => void;
 }
 
 const BLOCK_TAGS = new Set(["P", "LI", "BLOCKQUOTE", "H1", "H2", "H3", "H4", "H5", "H6"]);
@@ -610,6 +612,13 @@ export default function BookView(props: Props) {
     }
   }
 
+  function handleChat(phrase: string, range: Range) {
+    const container = articleRef();
+    if (!container) return;
+    const context = paragraphContext(range, container);
+    props.onOpenChat?.(phrase, context);
+  }
+
   async function handleDrawPicture(phrase: string, range: Range) {
     const r = resolvePhrase(phrase, range);
     if (!r) return;
@@ -811,6 +820,7 @@ export default function BookView(props: Props) {
           onRewriteConversation={handleRewriteConversation}
           onDrawPicture={handleDrawPicture}
           onDrawDiagram={handleDrawDiagram}
+          onChat={handleChat}
         />
 
         <Show when={busy()}>

@@ -137,6 +137,57 @@ describe("ChatModal", () => {
     });
   });
 
+  it("shows highlight banner when highlight prop is provided", () => {
+    render(() => (
+      <ChatModal
+        onClose={noopClose}
+        onManifestChanged={noopChanged}
+        highlight={{ phrase: "the mitochondria is the powerhouse", context: "Cell biology chapter." }}
+      />
+    ));
+    expect(screen.getByText("Selected passage")).toBeInTheDocument();
+    expect(screen.getByText("the mitochondria is the powerhouse")).toBeInTheDocument();
+  });
+
+  it("does not show highlight banner when highlight is null", () => {
+    render(() => (
+      <ChatModal onClose={noopClose} onManifestChanged={noopChanged} highlight={null} />
+    ));
+    expect(screen.queryByText("Selected passage")).not.toBeInTheDocument();
+  });
+
+  it("passes highlight phrase to chat_about_book on send", async () => {
+    mockInvoke.mockResolvedValue({ reply: "Got it!", patch: null });
+    render(() => (
+      <ChatModal
+        onClose={noopClose}
+        onManifestChanged={noopChanged}
+        highlight={{ phrase: "some highlighted text", context: "paragraph context" }}
+      />
+    ));
+    const input = screen.getByPlaceholderText(/message/i);
+    fireEvent.input(input, { target: { value: "What does this mean?" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("chat_about_book", expect.objectContaining({
+        highlight: "some highlighted text",
+      }));
+    });
+  });
+
+  it("passes null highlight when no highlight prop provided", async () => {
+    mockInvoke.mockResolvedValue({ reply: "Sure!", patch: null });
+    renderModal();
+    const input = screen.getByPlaceholderText(/message/i);
+    fireEvent.input(input, { target: { value: "hello" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("chat_about_book", expect.objectContaining({
+        highlight: null,
+      }));
+    });
+  });
+
   it("strips the json patch block from the displayed message", async () => {
     mockInvoke.mockResolvedValue({
       reply: "I suggest this change.\n```json\n{\"action\":\"rename_chapter\",\"id\":\"ch-01\",\"title\":\"New\"}\n```\nLet me know!",

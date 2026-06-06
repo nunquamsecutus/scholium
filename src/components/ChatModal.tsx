@@ -60,6 +60,11 @@ interface Props {
   onClose: () => void;
   /** Notified when a patch is applied so BookView can refresh. */
   onManifestChanged: (manifest: Manifest) => void;
+  /**
+   * Optional highlighted passage that initiated this chat session.
+   * Shown as a quoted banner above the thread and sent to the AI as context.
+   */
+  highlight?: { phrase: string; context: string } | null;
 }
 
 // ── Component ─────────────────────────────────────────────────────────────────
@@ -109,6 +114,7 @@ export default function ChatModal(props: Props) {
     try {
       const res = await invoke<ChatReply>("chat_about_book", {
         history: [...history()],
+        highlight: props.highlight?.phrase ?? null,
       });
 
       const assistantMsg: ChatMessage = {
@@ -191,6 +197,16 @@ export default function ChatModal(props: Props) {
             ×
           </button>
         </div>
+
+        {/* Highlight banner — shown when chat was opened from a text selection */}
+        <Show when={props.highlight}>
+          {(hl) => (
+            <div class="chat-highlight-banner">
+              <span class="chat-highlight-label">Selected passage</span>
+              <blockquote class="chat-highlight-quote">{hl().phrase}</blockquote>
+            </div>
+          )}
+        </Show>
 
         {/* Message thread */}
         <div class="chat-thread" ref={threadEl}>

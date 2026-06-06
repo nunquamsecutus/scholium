@@ -1527,6 +1527,10 @@ fn extract_patch(reply: &str) -> Option<ManifestPatch> {
 async fn chat_about_book(
     state: tauri::State<'_, AppState>,
     history: Vec<ChatMessage>,
+    // Optional highlighted passage the user has selected in the book.
+    // When present it is appended to the system prompt so the AI knows
+    // exactly what the user is looking at.
+    highlight: Option<String>,
 ) -> Result<ChatReply, String> {
     let settings = state.settings.lock().unwrap().clone();
     let book_path = state
@@ -1536,7 +1540,15 @@ async fn chat_about_book(
         .clone()
         .ok_or("No book is open")?;
     let book = manifest::load(&book_path)?;
-    let system_prompt = chat_system_prompt(&book);
+    let mut system_prompt = chat_system_prompt(&book);
+
+    if let Some(ref passage) = highlight {
+        system_prompt.push_str(&format!(
+            "\n\nThe user has highlighted the following passage in the book:\n\n\
+             \"{passage}\"\n\n\
+             Refer to this passage when answering unless the user's question is clearly unrelated to it."
+        ));
+    }
 
     // Build the full message list: system + conversation history.
     let mut messages = vec![llm::LlmMessage {

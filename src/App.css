@@ -2059,3 +2059,37 @@ body {
 }
 .chat-send:hover:not(:disabled) { filter: brightness(1.1); }
 .chat-send:disabled { opacity: 0.4; cursor: default; }
+
+/* Highlight banner */
+.chat-highlight-banner {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 20px 12px;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-input-bg);
+  flex-shrink: 0;
+}
+
+.chat-highlight-label {
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+.chat-highlight-quote {
+  margin: 0;
+  padding: 6px 12px;
+  border-left: 3px solid var(--color-accent, #3b82f6);
+  font-size: 0.875rem;
+  font-style: italic;
+  color: var(--color-text);
+  line-height: 1.5;
+  /* Clamp to 3 lines with a fade — quotes can be long */
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}

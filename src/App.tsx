@@ -19,12 +19,21 @@ function App() {
   const [stage, setStage] = createSignal<Stage>({ name: "welcome" });
   const [settingsOpen, setSettingsOpen] = createSignal(false);
   const [chatOpen, setChatOpen] = createSignal(false);
+  // Highlight context set when the user opens chat from a text selection.
+  // null when the chat is opened without a selection (e.g. via ⌘K).
+  const [chatHighlight, setChatHighlight] = createSignal<{
+    phrase: string;
+    context: string;
+  } | null>(null);
 
   onMount(() => {
     // The native "Settings…" menu item emits this event.
     const unlistenSettings = listen("open-settings", () => setSettingsOpen(true));
-    // The native "Chat…" menu item (⌘K) emits this event.
-    const unlistenChat = listen("open-chat", () => setChatOpen(true));
+    // The native "Chat…" menu item (⌘K) emits this event (no selection context).
+    const unlistenChat = listen("open-chat", () => {
+      setChatHighlight(null);
+      setChatOpen(true);
+    });
     onCleanup(() => {
       unlistenSettings.then((un) => un());
       unlistenChat.then((un) => un());
@@ -38,6 +47,11 @@ function App() {
     }
   }
 
+  function handleOpenChat(phrase: string, context: string) {
+    setChatHighlight({ phrase, context });
+    setChatOpen(true);
+  }
+
   return (
     <main class="app-shell">
       <Show when={settingsOpen()}>
@@ -46,9 +60,8 @@ function App() {
       <Show when={chatOpen()}>
         <ChatModal
           onClose={() => setChatOpen(false)}
-          onManifestChanged={(m) => {
-            handleManifestChanged(m);
-          }}
+          onManifestChanged={handleManifestChanged}
+          highlight={chatHighlight()}
         />
       </Show>
       <Switch>
@@ -77,6 +90,7 @@ function App() {
         <Match when={stage().name === "book"}>
           <BookView
             manifest={(stage() as { name: "book"; manifest: Manifest }).manifest}
+            onOpenChat={handleOpenChat}
           />
         </Match>
       </Switch>

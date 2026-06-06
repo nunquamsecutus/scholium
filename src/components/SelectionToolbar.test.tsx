@@ -262,4 +262,38 @@ describe("SelectionToolbar", () => {
     expect(word).toBe("blackhole");
     expect(range.toString()).toBe("lac");
   });
+
+  it("shows Chat button for phrase selections when onChat is provided", async () => {
+    const onChat = vi.fn();
+    const article = mountArticle("hello world foo");
+    const { findByRole } = render(() => (
+      <SelectionToolbar container={() => article} onChat={onChat} />
+    ));
+    selectInside(article, 0, 11); // "hello world" — multi-word phrase
+    expect(await findByRole("button", { name: "Chat" })).toBeInTheDocument();
+  });
+
+  it("does not show Chat button when onChat is not provided", async () => {
+    const article = mountArticle("hello world foo");
+    const { findByRole, queryByRole } = render(() => (
+      <SelectionToolbar container={() => article} />
+    ));
+    selectInside(article, 0, 11);
+    await findByRole("button", { name: "I don't understand" }); // wait for toolbar
+    expect(queryByRole("button", { name: "Chat" })).not.toBeInTheDocument();
+  });
+
+  it("calls onChat with the phrase and Range when Chat is clicked", async () => {
+    const onChat = vi.fn();
+    const article = mountArticle("hello world foo");
+    const { findByRole } = render(() => (
+      <SelectionToolbar container={() => article} onChat={onChat} />
+    ));
+    selectInside(article, 0, 11);
+    fireEvent.click(await findByRole("button", { name: "Chat" }));
+    expect(onChat).toHaveBeenCalledTimes(1);
+    const [phrase, range] = onChat.mock.calls[0];
+    expect(phrase).toBe("hello world");
+    expect(range).toBeInstanceOf(Range);
+  });
 });
