@@ -1,4 +1,4 @@
-# Edu-Harness
+# Scholium
 
 Solidjs and tauri application for interactive educational books. Based on a description of something that the user desires to learn, will generate a lesson plan and (markdown|html|latex|abstraction) lesson content, including pictures and diagrams if appropriate. 
 
@@ -19,12 +19,4 @@ Settings persist to a config file in the app config dir, and the Claude API
 key is stored in the OS keyring. The CLI flags below remain available as a
 dev override.
 
-## Claude
-`npm run tauri dev -- -- --api-key sk-ant-...`
-
-The `ANTHROPIC_API_KEY` env var is deprecated: on first launch it is migrated
-into the keyring once, after which Settings is the source of truth.
-
-# Ollama
-`npm run tauri dev -- -- --ollama-url http://localhost:11434 --ollama-model mistral`
-
+`npm run tauri dev`
