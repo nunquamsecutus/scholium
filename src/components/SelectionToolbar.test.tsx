@@ -143,7 +143,7 @@ describe("SelectionToolbar", () => {
 
     expect(onRewriteConversation).toHaveBeenCalledTimes(1);
     const [rewriteId, r] = onRewriteConversation.mock.calls[0];
-    expect(rewriteId).toBe(7);
+    expect(rewriteId).toBe("7");
     expect(r).toBeInstanceOf(Range);
   });
 

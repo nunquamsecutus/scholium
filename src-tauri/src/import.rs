@@ -75,7 +75,7 @@ pub fn book_title_from_dirname(name: &str) -> String {
 /// caller-provided chapter order. Returns the loaded manifest.
 ///
 /// `dest_path` is the user-chosen `.scholium` save location (mirroring the
-/// create_book flow). Each markdown file becomes an `.edupage` under
+/// create_book flow). Each markdown file becomes a `.md` chapter under
 /// `chapters/`; a manifest is written at `dest_path`.
 pub fn import_book(
     source_dir: &Path,
@@ -105,13 +105,13 @@ pub fn import_book(
         let title = chapter_title_from_filename(filename);
         let slug = slugify(filename.trim_end_matches(".markdown").trim_end_matches(".md"));
         let chapter_id = format!("ch-{}", n);
-        let chapter_file = format!("chapters/{}-{}.edupage", n, slug);
+        let chapter_file = format!("chapters/{}-{}.md", n, slug);
 
         let source_path = source_dir.join(filename);
         let content = std::fs::read_to_string(&source_path)
             .map_err(|e| format!("failed to read {filename}: {e}"))?;
 
-        let edupage_raw = edupage::create(&chapter_id, &title, None, &content);
+        let edupage_raw = edupage::create(&content);
         std::fs::write(book_dir.join(&chapter_file), &edupage_raw)
             .map_err(|e| format!("failed to write chapter {filename}: {e}"))?;
 
@@ -148,6 +148,7 @@ pub fn import_book(
             summary: String::new(),
             chapters,
         },
+        artifacts: vec![],
     };
 
     manifest::save(&book, &manifest_path)?;
@@ -217,8 +218,8 @@ mod tests {
         let book_dir = book_root.join("my-book");
         for ch in &manifest.lesson_plan.chapters {
             let raw = std::fs::read_to_string(book_dir.join(&ch.file)).unwrap();
-            let body = edupage::reconstruct(&raw).unwrap();
-            assert!(body.starts_with(&format!("# {}", ch.title)));
+            let page = edupage::read(&raw).unwrap();
+            assert!(page.content.starts_with(&format!("# {}", ch.title)));
         }
 
         // Manifest itself is on disk where we expect.

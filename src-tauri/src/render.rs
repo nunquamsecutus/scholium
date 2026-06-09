@@ -352,8 +352,8 @@ pub fn render_chapter_html(
     notes: &[NoteWithBody],
     artifacts: &[ArtifactWithBody],
 ) -> String {
-    let artifact_map: std::collections::HashMap<u32, &ArtifactWithBody> =
-        artifacts.iter().map(|a| (a.id, a)).collect();
+    let artifact_map: std::collections::HashMap<&str, &ArtifactWithBody> =
+        artifacts.iter().map(|a| (a.id.as_str(), a)).collect();
 
     let opts = Options::empty();
 
@@ -455,14 +455,12 @@ pub fn render_chapter_html(
             Event::Start(Tag::Image { dest_url, .. }) => {
                 // epar:// images are artifact references — inline the SVG.
                 if let Some(id_str) = dest_url.strip_prefix("epar://") {
-                    if let Ok(id) = id_str.parse::<u32>() {
-                        if let Some(art) = artifact_map.get(&id) {
-                            // Flush any pending block open tag first.
-                            if let Some(open) = pending_block_open.take() {
-                                out.push_str(&open);
-                            }
-                            out.push_str(&figure_for(art));
+                    if let Some(art) = artifact_map.get(id_str) {
+                        // Flush any pending block open tag first.
+                        if let Some(open) = pending_block_open.take() {
+                            out.push_str(&open);
                         }
+                        out.push_str(&figure_for(art));
                     }
                 }
                 // Other images fall through; End(Image) closes them.
@@ -714,7 +712,7 @@ mod tests {
     fn artifact_figure_contains_svg() {
         use crate::edupage::ArtifactWithBody;
         let art = ArtifactWithBody {
-            id: 1,
+            id: "abc123def456.svg".to_string(),
             mime_type: "image/svg+xml".into(),
             semantic_type: "diagram".into(),
             ctime: "2026-01-01T00:00:00Z".into(),
@@ -734,7 +732,7 @@ mod tests {
     fn artifact_figure_renders_raster_as_img_tag() {
         use crate::edupage::ArtifactWithBody;
         let art = ArtifactWithBody {
-            id: 2,
+            id: "def789abc012.png".to_string(),
             mime_type: "image/png".into(),
             semantic_type: "image".into(),
             ctime: "2026-01-01T00:00:00Z".into(),

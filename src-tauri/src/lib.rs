@@ -4,6 +4,7 @@ mod define;
 mod diagram;
 mod edupage;
 mod expand;
+mod git;
 mod image;
 mod import;
 mod llm;
@@ -608,12 +609,7 @@ async fn generate_chapter(
         std::fs::create_dir_all(dir)
             .map_err(|e| format!("failed to create chapter directory: {e}"))?;
     }
-    let page = edupage::create(
-        &chapter_id,
-        &book.lesson_plan.chapters[idx].title,
-        book.lesson_plan.chapters[idx].description.as_deref(),
-        &content,
-    );
+    let page = edupage::create(&content);
     std::fs::write(&chapter_path, &page)
         .map_err(|e| format!("failed to write chapter file: {e}"))?;
 
@@ -631,11 +627,18 @@ fn read_chapter(
     state: tauri::State<'_, AppState>,
     chapter_id: String,
 ) -> Result<ChapterContent, String> {
+    let book_path = state
+        .book_path
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("no book is open")?;
+    let book = manifest::load(&book_path)?;
     let chapter_path = chapter_path_for(&state, &chapter_id)?;
     let raw = std::fs::read_to_string(&chapter_path)
         .map_err(|e| format!("failed to read chapter: {e}"))?;
     let page = edupage::read(&raw)?;
-    Ok(chapter_content(page, &images_dir_from_state(&state)?))
+    Ok(chapter_content(page, &book, &images_dir_for(&book_path)))
 }
 
 // ── Definition (LLM, context-aware) ──────────────────────────────────────────
@@ -687,7 +690,7 @@ async fn define_word(
         .map_err(|e| format!("failed to write chapter: {e}"))?;
 
     let page = edupage::read(&new_raw)?;
-    Ok(chapter_content(page, &images_dir_from_state(&state)?))
+    Ok(chapter_content(page, &book, &images_dir_from_state(&state)?))
 }
 
 // ── Notes (marginalia / footnotes / endnotes) ─────────────────────────────────
@@ -710,6 +713,40 @@ fn ext_for_mime(mime: &str) -> &'static str {
         "image/jpeg" => "jpg",
         _ => "png",
     }
+}
+
+/// Compute a content-addressed artifact ID: `sha1hex.ext`.
+///
+/// The SHA1 is computed over the raw body string (SVG text for vector images,
+/// base64-encoded bytes for raster images).  The extension is derived from the
+/// MIME type via `ext_for_mime`.
+fn sha1_of_body(body: &str, mime_type: &str) -> String {
+    use sha1::{Digest, Sha1};
+    let mut hasher = Sha1::new();
+    hasher.update(body.as_bytes());
+    let result = hasher.finalize();
+    let hex: String = result.iter().map(|b| format!("{:02x}", b)).collect();
+    format!("{}.{}", hex, ext_for_mime(mime_type))
+}
+
+/// Collect all `epar://` artifact IDs referenced in a chapter's markdown content.
+fn collect_epar_ids(content: &str) -> Vec<String> {
+    let prefix = "epar://";
+    let mut ids = Vec::new();
+    let mut start = 0;
+    while let Some(rel) = content[start..].find(prefix) {
+        let abs = start + rel + prefix.len();
+        let rest = &content[abs..];
+        let end = rest
+            .find(|c: char| c == ')' || c.is_whitespace())
+            .unwrap_or(rest.len());
+        let id = &rest[..end];
+        if !id.is_empty() {
+            ids.push(id.to_string());
+        }
+        start = abs;
+    }
+    ids
 }
 
 /// Returns the `images/` directory for an open book given its manifest path.
@@ -743,8 +780,8 @@ fn load_artifact_bodies(
     metas
         .iter()
         .map(|meta| {
-            let ext = ext_for_mime(&meta.mime_type);
-            let path = images_dir.join(format!("{}.{}", meta.id, ext));
+            // artifact id already includes the extension (e.g., "abc123.svg").
+            let path = images_dir.join(&meta.id);
             let body = if meta.mime_type == "image/svg+xml" {
                 std::fs::read_to_string(&path).unwrap_or_default()
             } else {
@@ -753,7 +790,7 @@ fn load_artifact_bodies(
                     .unwrap_or_default()
             };
             edupage::ArtifactWithBody {
-                id: meta.id,
+                id: meta.id.clone(),
                 mime_type: meta.mime_type.clone(),
                 semantic_type: meta.semantic_type.clone(),
                 ctime: meta.ctime.clone(),
@@ -774,12 +811,12 @@ fn load_artifact_bodies(
 fn write_artifact_body(
     body: &str,
     mime_type: &str,
-    artifact_id: u32,
+    artifact_id: &str,
     images_dir: &std::path::Path,
 ) -> Result<(), String> {
     use base64::Engine;
-    let ext = ext_for_mime(mime_type);
-    let path = images_dir.join(format!("{artifact_id}.{ext}"));
+    // artifact_id already includes the extension (e.g., "abc123.svg").
+    let path = images_dir.join(artifact_id);
     if mime_type == "image/svg+xml" {
         std::fs::write(&path, body.as_bytes())
             .map_err(|e| format!("failed to write image {artifact_id}: {e}"))
@@ -794,16 +831,27 @@ fn write_artifact_body(
 
 /// Renders an `EduPage` into a `ChapterContent` by loading artifact bodies
 /// from the book's `images/` directory.
+///
+/// Artifact metadata lives in the book manifest; this function filters
+/// `book.artifacts` to only those referenced via `epar://` in the chapter.
 fn chapter_content(
     page: edupage::EduPage,
+    book: &manifest::Manifest,
     images_dir: &std::path::Path,
 ) -> ChapterContent {
-    let artifacts_with_body = load_artifact_bodies(&page.artifacts, images_dir);
+    let epar_ids = collect_epar_ids(&page.content);
+    let chapter_artifacts: Vec<edupage::ArtifactMeta> = book
+        .artifacts
+        .iter()
+        .filter(|a| epar_ids.contains(&a.id))
+        .cloned()
+        .collect();
+    let artifacts_with_body = load_artifact_bodies(&chapter_artifacts, images_dir);
     let html = render::render_chapter_html(&page.content, &page.notes, &artifacts_with_body);
     ChapterContent {
         html,
         notes: page.notes,
-        artifacts: page.artifacts,
+        artifacts: chapter_artifacts,
     }
 }
 
@@ -878,7 +926,7 @@ async fn add_footnote(
         .map_err(|e| format!("failed to write chapter: {e}"))?;
 
     let page = edupage::read(&new_raw)?;
-    Ok(chapter_content(page, &images_dir_from_state(&state)?))
+    Ok(chapter_content(page, &book, &images_dir_from_state(&state)?))
 }
 
 #[tauri::command]
@@ -929,7 +977,7 @@ async fn add_endnote(
         .map_err(|e| format!("failed to write chapter: {e}"))?;
 
     let page = edupage::read(&new_raw)?;
-    Ok(chapter_content(page, &images_dir_from_state(&state)?))
+    Ok(chapter_content(page, &book, &images_dir_from_state(&state)?))
 }
 
 #[tauri::command]
@@ -954,14 +1002,47 @@ async fn add_image(
         run_image_pipeline(&app, &settings, &selection_text, &context, None).await?;
     let aspect = image::aspect_ratio_for(&generated.body, &generated.mime_type);
 
+    // Compute content-addressed ID and persist the artifact body.
+    let sha1_id = sha1_of_body(&generated.body, &generated.mime_type);
+    let images_dir = images_dir_from_state(&state)?;
+    write_artifact_body(&generated.body, &generated.mime_type, &sha1_id, &images_dir)?;
+
+    // Register artifact in the book manifest (idempotent — same content = same id).
+    let book_path = state
+        .book_path
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("no book is open")?;
+    let mut book = manifest::load(&book_path)?;
+    if !book.artifacts.iter().any(|a| a.id == sha1_id) {
+        let caption_opt = if generated.caption.is_empty() {
+            None
+        } else {
+            Some(generated.caption.clone())
+        };
+        book.artifacts.push(edupage::ArtifactMeta {
+            id: sha1_id.clone(),
+            mime_type: generated.mime_type.clone(),
+            semantic_type: "image".to_string(),
+            ctime: chrono::Utc::now().to_rfc3339(),
+            caption: caption_opt,
+            aspect_ratio: aspect,
+            source: selection_text.clone(),
+        });
+    }
+    book.metadata.modified = chrono::Utc::now().to_rfc3339();
+    manifest::save(&book, &book_path)?;
+
+    // Insert the artifact reference into the chapter.
     let chapter_path = chapter_path_for(&state, &chapter_id)?;
     let raw_file = std::fs::read_to_string(&chapter_path)
         .map_err(|e| format!("failed to read chapter: {e}"))?;
-    let (new_raw, artifact) = edupage::add_artifact_at(
+    let new_raw = edupage::add_artifact_at(
         &raw_file,
         src_start,
         src_end,
-        &generated.mime_type,
+        &sha1_id,
         &generated.caption,
         aspect,
         "image",
@@ -969,11 +1050,8 @@ async fn add_image(
     std::fs::write(&chapter_path, &new_raw)
         .map_err(|e| format!("failed to write chapter: {e}"))?;
 
-    let images_dir = images_dir_from_state(&state)?;
-    write_artifact_body(&generated.body, &generated.mime_type, artifact.id, &images_dir)?;
-
     let page = edupage::read(&new_raw)?;
-    Ok(chapter_content(page, &images_dir))
+    Ok(chapter_content(page, &book, &images_dir))
 }
 
 #[tauri::command]
@@ -999,9 +1077,9 @@ async fn add_diagram(
         .unwrap()
         .clone()
         .ok_or("no book is open")?;
-    let book = manifest::load(&book_path)?;
-    let reading_level = book.metadata.reading_level.as_deref().unwrap_or("adult");
-    let original_prompt = Some(book.metadata.prompt.as_str()).filter(|s| !s.is_empty());
+    let mut book = manifest::load(&book_path)?;
+    let reading_level = book.metadata.reading_level.as_deref().unwrap_or("adult").to_string();
+    let original_prompt = if book.metadata.prompt.is_empty() { None } else { Some(book.metadata.prompt.clone()) };
 
     let settings = state.settings.lock().unwrap().clone();
     let generated = run_diagram_pipeline(
@@ -1009,20 +1087,46 @@ async fn add_diagram(
         &settings,
         &selection_text,
         &context,
-        reading_level,
-        original_prompt,
+        &reading_level,
+        original_prompt.as_deref(),
     )
     .await?;
     let aspect = image::aspect_ratio_for(&generated.body, &generated.mime_type);
 
+    // Compute content-addressed ID and persist the artifact body.
+    let sha1_id = sha1_of_body(&generated.body, &generated.mime_type);
+    let images_dir = images_dir_for(&book_path);
+    write_artifact_body(&generated.body, &generated.mime_type, &sha1_id, &images_dir)?;
+
+    // Register artifact in the book manifest (idempotent — same content = same id).
+    if !book.artifacts.iter().any(|a| a.id == sha1_id) {
+        let caption_opt = if generated.caption.is_empty() {
+            None
+        } else {
+            Some(generated.caption.clone())
+        };
+        book.artifacts.push(edupage::ArtifactMeta {
+            id: sha1_id.clone(),
+            mime_type: generated.mime_type.clone(),
+            semantic_type: "diagram".to_string(),
+            ctime: chrono::Utc::now().to_rfc3339(),
+            caption: caption_opt,
+            aspect_ratio: aspect,
+            source: selection_text.clone(),
+        });
+    }
+    book.metadata.modified = chrono::Utc::now().to_rfc3339();
+    manifest::save(&book, &book_path)?;
+
+    // Insert the artifact reference into the chapter.
     let chapter_path = chapter_path_for(&state, &chapter_id)?;
     let raw_file = std::fs::read_to_string(&chapter_path)
         .map_err(|e| format!("failed to read chapter: {e}"))?;
-    let (new_raw, artifact) = edupage::add_artifact_at(
+    let new_raw = edupage::add_artifact_at(
         &raw_file,
         src_start,
         src_end,
-        &generated.mime_type,
+        &sha1_id,
         &generated.caption,
         aspect,
         "diagram",
@@ -1030,11 +1134,8 @@ async fn add_diagram(
     std::fs::write(&chapter_path, &new_raw)
         .map_err(|e| format!("failed to write chapter: {e}"))?;
 
-    let images_dir = images_dir_for(&book_path);
-    write_artifact_body(&generated.body, &generated.mime_type, artifact.id, &images_dir)?;
-
     let page = edupage::read(&new_raw)?;
-    Ok(chapter_content(page, &images_dir))
+    Ok(chapter_content(page, &book, &images_dir))
 }
 
 #[tauri::command]
@@ -1042,7 +1143,7 @@ async fn regenerate_artifact(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     chapter_id: String,
-    artifact_id: u32,
+    artifact_id: String,
     instruction: String,
     context: String,
 ) -> Result<ChapterContent, String> {
@@ -1050,11 +1151,15 @@ async fn regenerate_artifact(
         return Err("empty instruction".to_string());
     }
 
-    let chapter_path = chapter_path_for(&state, &chapter_id)?;
-    let raw_file = std::fs::read_to_string(&chapter_path)
-        .map_err(|e| format!("failed to read chapter: {e}"))?;
-    let page = edupage::read(&raw_file)?;
-    let artifact = page
+    let book_path = state
+        .book_path
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("no book is open")?;
+    let mut book = manifest::load(&book_path)?;
+
+    let artifact = book
         .artifacts
         .iter()
         .find(|a| a.id == artifact_id)
@@ -1063,16 +1168,8 @@ async fn regenerate_artifact(
     let semantic_type = artifact.semantic_type.clone();
 
     let settings = state.settings.lock().unwrap().clone();
-    // Dispatch to the pipeline matching the artifact's kind. The user's
-    // instruction is folded into the composition step.
+    // Dispatch to the pipeline matching the artifact's kind.
     let generated = if semantic_type == "diagram" {
-        let book_path = state
-            .book_path
-            .lock()
-            .unwrap()
-            .clone()
-            .ok_or("no book is open")?;
-        let book = manifest::load(&book_path)?;
         let reading_level = book.metadata.reading_level.as_deref().unwrap_or("adult");
         let original_prompt = Some(book.metadata.prompt.as_str()).filter(|s| !s.is_empty());
         let combined_source = format!("{source} (with this change: {instruction})");
@@ -1090,61 +1187,90 @@ async fn regenerate_artifact(
     };
     let new_aspect = image::aspect_ratio_for(&generated.body, &generated.mime_type);
 
-    // Delete the old image file before writing the new one (the MIME type may
-    // have changed, meaning the extension changes and the old file would be
-    // orphaned).
     let images_dir = images_dir_from_state(&state)?;
-    let old_mime = page.artifacts.iter().find(|a| a.id == artifact_id)
-        .map(|a| a.mime_type.clone())
-        .unwrap_or_default();
-    let old_path = images_dir.join(format!("{}.{}", artifact_id, ext_for_mime(&old_mime)));
+
+    // Compute new content-addressed ID.
+    let new_sha1_id = sha1_of_body(&generated.body, &generated.mime_type);
+
+    // Delete the old image file (artifact_id is already the filename).
+    let old_path = images_dir.join(&artifact_id);
     let _ = std::fs::remove_file(&old_path);
 
-    let (new_raw, _) = edupage::regenerate_artifact(
+    // Update the chapter file.
+    let chapter_path = chapter_path_for(&state, &chapter_id)?;
+    let raw_file = std::fs::read_to_string(&chapter_path)
+        .map_err(|e| format!("failed to read chapter: {e}"))?;
+    let new_raw = edupage::regenerate_artifact(
         &raw_file,
-        artifact_id,
-        &generated.mime_type,
+        &artifact_id,
+        &new_sha1_id,
         &generated.caption,
         new_aspect,
     )?;
     std::fs::write(&chapter_path, &new_raw)
         .map_err(|e| format!("failed to write chapter: {e}"))?;
 
-    write_artifact_body(&generated.body, &generated.mime_type, artifact_id, &images_dir)?;
+    // Write new image body.
+    write_artifact_body(&generated.body, &generated.mime_type, &new_sha1_id, &images_dir)?;
+
+    // Update manifest: replace old artifact entry with new one.
+    let caption_opt = if generated.caption.is_empty() {
+        None
+    } else {
+        Some(generated.caption.clone())
+    };
+    if let Some(pos) = book.artifacts.iter().position(|a| a.id == artifact_id) {
+        book.artifacts[pos] = edupage::ArtifactMeta {
+            id: new_sha1_id.clone(),
+            mime_type: generated.mime_type.clone(),
+            semantic_type,
+            ctime: chrono::Utc::now().to_rfc3339(),
+            caption: caption_opt,
+            aspect_ratio: new_aspect,
+            source,
+        };
+    }
+    book.metadata.modified = chrono::Utc::now().to_rfc3339();
+    manifest::save(&book, &book_path)?;
 
     let page = edupage::read(&new_raw)?;
-    Ok(chapter_content(page, &images_dir))
+    Ok(chapter_content(page, &book, &images_dir))
 }
 
 #[tauri::command]
 fn delete_artifact(
     state: tauri::State<'_, AppState>,
     chapter_id: String,
-    artifact_id: u32,
+    artifact_id: String,
 ) -> Result<ChapterContent, String> {
     let images_dir = images_dir_from_state(&state)?;
     let chapter_path = chapter_path_for(&state, &chapter_id)?;
     let raw = std::fs::read_to_string(&chapter_path)
         .map_err(|e| format!("failed to read chapter: {e}"))?;
 
-    // Find the artifact's MIME type before deleting from the edupage, so we
-    // know which file extension to remove from disk.
-    let mime = edupage::read(&raw)?
-        .artifacts
-        .iter()
-        .find(|a| a.id == artifact_id)
-        .map(|a| a.mime_type.clone())
-        .unwrap_or_default();
+    // Remove artifact from manifest and save.
+    let book_path = state
+        .book_path
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("no book is open")?;
+    let mut book = manifest::load(&book_path)?;
+    book.artifacts.retain(|a| a.id != artifact_id);
+    book.metadata.modified = chrono::Utc::now().to_rfc3339();
+    manifest::save(&book, &book_path)?;
 
-    let new_raw = edupage::delete_artifact(&raw, artifact_id)?;
+    // Remove the artifact reference from the chapter content.
+    let new_raw = edupage::delete_artifact(&raw, &artifact_id)?;
     std::fs::write(&chapter_path, &new_raw)
         .map_err(|e| format!("failed to write chapter: {e}"))?;
 
-    let image_path = images_dir.join(format!("{}.{}", artifact_id, ext_for_mime(&mime)));
+    // Delete the image file from disk (artifact_id is the filename).
+    let image_path = images_dir.join(&artifact_id);
     let _ = std::fs::remove_file(&image_path);
 
     let page = edupage::read(&new_raw)?;
-    Ok(chapter_content(page, &images_dir))
+    Ok(chapter_content(page, &book, &images_dir))
 }
 
 #[tauri::command]
@@ -1191,7 +1317,7 @@ async fn rewrite_passage(
         .map_err(|e| format!("failed to write chapter: {e}"))?;
 
     let page = edupage::read(&new_raw)?;
-    Ok(chapter_content(page, &images_dir_from_state(&state)?))
+    Ok(chapter_content(page, &book, &images_dir_from_state(&state)?))
 }
 
 #[tauri::command]
@@ -1225,7 +1351,7 @@ async fn converse_about_rewrite(
 async fn rewrite_with_conversation(
     state: tauri::State<'_, AppState>,
     chapter_id: String,
-    rewrite_id: u32,
+    rewrite_id: String,
     passage: String,
     context: String,
     history: Vec<llm::LlmMessage>,
@@ -1261,12 +1387,12 @@ async fn rewrite_with_conversation(
     let chapter_path = chapter_path_for(&state, &chapter_id)?;
     let raw_file = std::fs::read_to_string(&chapter_path)
         .map_err(|e| format!("failed to read chapter: {e}"))?;
-    let (new_raw, _) = edupage::rewrite_existing_span(&raw_file, rewrite_id, &replacement)?;
+    let (new_raw, _) = edupage::rewrite_existing_span(&raw_file, &rewrite_id, &replacement)?;
     std::fs::write(&chapter_path, &new_raw)
         .map_err(|e| format!("failed to write chapter: {e}"))?;
 
     let page = edupage::read(&new_raw)?;
-    Ok(chapter_content(page, &images_dir_from_state(&state)?))
+    Ok(chapter_content(page, &book, &images_dir_from_state(&state)?))
 }
 
 #[derive(serde::Serialize)]
@@ -1344,7 +1470,7 @@ async fn add_appendix(
 
     let appendix_id = format!("ap-{}", seq);
     let appendix_title = appendix_title_from(seq, selection);
-    let appendix_file = format!("chapters/{}.edupage", appendix_id);
+    let appendix_file = format!("chapters/{}.md", appendix_id);
 
     let book_dir = book_path.parent().ok_or("invalid book path")?.to_path_buf();
     let appendix_path = book_dir.join(&appendix_file);
@@ -1352,7 +1478,7 @@ async fn add_appendix(
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("failed to create chapters dir: {e}"))?;
     }
-    let edupage_raw = edupage::create(&appendix_id, &appendix_title, None, &content);
+    let edupage_raw = edupage::create(&content);
     std::fs::write(&appendix_path, &edupage_raw)
         .map_err(|e| format!("failed to write appendix file: {e}"))?;
 
@@ -1383,12 +1509,11 @@ async fn add_appendix(
 
     let page = edupage::read(&new_source_raw)?;
     let images_dir = images_dir_for(&book_path);
-    let artifacts_with_body = load_artifact_bodies(&page.artifacts, &images_dir);
-    let html = render::render_chapter_html(&page.content, &page.notes, &artifacts_with_body);
+    let cc = chapter_content(page, &book, &images_dir);
     Ok(AppendixResult {
-        html,
-        notes: page.notes,
-        artifacts: page.artifacts,
+        html: cc.html,
+        notes: cc.notes,
+        artifacts: cc.artifacts,
         manifest: book,
     })
 }
@@ -1399,6 +1524,13 @@ fn delete_note(
     chapter_id: String,
     note_id: u32,
 ) -> Result<ChapterContent, String> {
+    let book_path = state
+        .book_path
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("no book is open")?;
+    let book = manifest::load(&book_path)?;
     let chapter_path = chapter_path_for(&state, &chapter_id)?;
     let raw = std::fs::read_to_string(&chapter_path)
         .map_err(|e| format!("failed to read chapter: {e}"))?;
@@ -1406,7 +1538,7 @@ fn delete_note(
     std::fs::write(&chapter_path, &new_raw)
         .map_err(|e| format!("failed to write chapter: {e}"))?;
     let page = edupage::read(&new_raw)?;
-    Ok(chapter_content(page, &images_dir_from_state(&state)?))
+    Ok(chapter_content(page, &book, &images_dir_for(&book_path)))
 }
 
 #[tauri::command]
@@ -1418,6 +1550,13 @@ fn add_note(
     src_end: usize,
     body: String,
 ) -> Result<ChapterContent, String> {
+    let book_path = state
+        .book_path
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("no book is open")?;
+    let book = manifest::load(&book_path)?;
     let chapter_path = chapter_path_for(&state, &chapter_id)?;
     let raw = std::fs::read_to_string(&chapter_path)
         .map_err(|e| format!("failed to read chapter: {e}"))?;
@@ -1433,7 +1572,7 @@ fn add_note(
         .map_err(|e| format!("failed to write chapter: {e}"))?;
 
     let page = edupage::read(&new_raw)?;
-    Ok(chapter_content(page, &images_dir_from_state(&state)?))
+    Ok(chapter_content(page, &book, &images_dir_for(&book_path)))
 }
 
 // ── Book management ───────────────────────────────────────────────────────────
@@ -1463,6 +1602,8 @@ fn create_book(
     std::fs::create_dir_all(book_dir.join("images"))
         .map_err(|e| format!("failed to create images dir: {e}"))?;
 
+    git::init(&book_dir)?;
+
     let now = chrono::Utc::now().to_rfc3339();
     let title = title_case(&topic);
 
@@ -1483,6 +1624,7 @@ fn create_book(
             summary: plan.summary,
             chapters: plan.lesson_plan.chapters,
         },
+        artifacts: vec![],
     };
 
     manifest::save(&book, &manifest_path)?;
@@ -1516,11 +1658,14 @@ fn import_book(
         .and_then(|s| s.to_str())
         .ok_or("invalid destination path")?
         .to_string();
-    let manifest_path = std::path::Path::new(&dest_path)
+    let book_dir = std::path::Path::new(&dest_path)
         .parent()
         .ok_or("invalid destination path")?
-        .join(&stem)
-        .join(format!("{stem}.scholium"));
+        .join(&stem);
+    let manifest_path = book_dir.join(format!("{stem}.scholium"));
+
+    git::init(&book_dir)?;
+
     *state.book_path.lock().unwrap() = Some(manifest_path);
 
     Ok(book)
@@ -2064,8 +2209,8 @@ mod tests {
     fn write_artifact_body_writes_svg_as_text() {
         let dir = temp_dir();
         let svg = r#"<svg viewBox="0 0 100 50"><rect width="100" height="50"/></svg>"#;
-        write_artifact_body(svg, "image/svg+xml", 1, &dir).unwrap();
-        let written = std::fs::read_to_string(dir.join("1.svg")).unwrap();
+        write_artifact_body(svg, "image/svg+xml", "abc1.svg", &dir).unwrap();
+        let written = std::fs::read_to_string(dir.join("abc1.svg")).unwrap();
         assert_eq!(written, svg);
     }
 
@@ -2075,32 +2220,32 @@ mod tests {
         let dir = temp_dir();
         let bytes: Vec<u8> = vec![137, 80, 78, 71, 13, 10, 26, 10]; // PNG magic header
         let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-        write_artifact_body(&b64, "image/png", 2, &dir).unwrap();
-        let written = std::fs::read(dir.join("2.png")).unwrap();
+        write_artifact_body(&b64, "image/png", "def2.png", &dir).unwrap();
+        let written = std::fs::read(dir.join("def2.png")).unwrap();
         assert_eq!(written, bytes);
     }
 
     #[test]
-    fn write_artifact_body_uses_jpg_extension_for_jpeg() {
+    fn write_artifact_body_uses_correct_extension_in_id() {
         use base64::Engine;
         let dir = temp_dir();
         let b64 = base64::engine::general_purpose::STANDARD.encode(b"\xFF\xD8\xFF");
-        write_artifact_body(&b64, "image/jpeg", 3, &dir).unwrap();
-        assert!(dir.join("3.jpg").exists());
+        write_artifact_body(&b64, "image/jpeg", "ghi3.jpg", &dir).unwrap();
+        assert!(dir.join("ghi3.jpg").exists());
     }
 
     #[test]
     fn write_artifact_body_errors_on_invalid_base64() {
         let dir = temp_dir();
-        let result = write_artifact_body("not valid base64!!!", "image/png", 4, &dir);
+        let result = write_artifact_body("not valid base64!!!", "image/png", "jkl4.png", &dir);
         assert!(result.is_err());
     }
 
     // ── load_artifact_bodies ─────────────────────────────────────────────────
 
-    fn sample_meta(id: u32, mime: &str) -> edupage::ArtifactMeta {
+    fn sample_meta(id: &str, mime: &str) -> edupage::ArtifactMeta {
         edupage::ArtifactMeta {
-            id,
+            id: id.to_string(),
             mime_type: mime.to_string(),
             semantic_type: "image".to_string(),
             ctime: "2026-01-01T00:00:00Z".to_string(),
@@ -2114,11 +2259,11 @@ mod tests {
     fn load_artifact_bodies_reads_svg_body_from_disk() {
         let dir = temp_dir();
         let svg = r#"<svg viewBox="0 0 10 10"><circle/></svg>"#;
-        std::fs::write(dir.join("1.svg"), svg).unwrap();
+        std::fs::write(dir.join("sha1a.svg"), svg).unwrap();
 
-        let bodies = load_artifact_bodies(&[sample_meta(1, "image/svg+xml")], &dir);
+        let bodies = load_artifact_bodies(&[sample_meta("sha1a.svg", "image/svg+xml")], &dir);
         assert_eq!(bodies.len(), 1);
-        assert_eq!(bodies[0].id, 1);
+        assert_eq!(bodies[0].id, "sha1a.svg");
         assert_eq!(bodies[0].body, svg);
         assert_eq!(bodies[0].mime_type, "image/svg+xml");
     }
@@ -2128,9 +2273,9 @@ mod tests {
         use base64::Engine;
         let dir = temp_dir();
         let bytes: Vec<u8> = vec![137, 80, 78, 71, 13, 10, 26, 10];
-        std::fs::write(dir.join("2.png"), &bytes).unwrap();
+        std::fs::write(dir.join("sha1b.png"), &bytes).unwrap();
 
-        let bodies = load_artifact_bodies(&[sample_meta(2, "image/png")], &dir);
+        let bodies = load_artifact_bodies(&[sample_meta("sha1b.png", "image/png")], &dir);
         let expected = base64::engine::general_purpose::STANDARD.encode(&bytes);
         assert_eq!(bodies[0].body, expected);
     }
@@ -2139,7 +2284,7 @@ mod tests {
     fn load_artifact_bodies_returns_empty_string_for_missing_file() {
         let dir = temp_dir();
         // No file written — simulates a missing or not-yet-generated image.
-        let bodies = load_artifact_bodies(&[sample_meta(99, "image/svg+xml")], &dir);
+        let bodies = load_artifact_bodies(&[sample_meta("missing.svg", "image/svg+xml")], &dir);
         assert_eq!(bodies.len(), 1);
         assert_eq!(bodies[0].body, ""); // graceful degradation, no panic
     }
@@ -2147,8 +2292,8 @@ mod tests {
     #[test]
     fn load_artifact_bodies_preserves_metadata_fields() {
         let dir = temp_dir();
-        std::fs::write(dir.join("5.svg"), "<svg/>").unwrap();
-        let mut meta = sample_meta(5, "image/svg+xml");
+        std::fs::write(dir.join("sha1c.svg"), "<svg/>").unwrap();
+        let mut meta = sample_meta("sha1c.svg", "image/svg+xml");
         meta.caption = Some("a caption".to_string());
         meta.aspect_ratio = 2.5;
         meta.semantic_type = "diagram".to_string();
@@ -2163,9 +2308,9 @@ mod tests {
     fn write_then_load_roundtrip_svg() {
         let dir = temp_dir();
         let svg = r#"<svg viewBox="0 0 200 100"><text>Hello</text></svg>"#;
-        write_artifact_body(svg, "image/svg+xml", 7, &dir).unwrap();
+        write_artifact_body(svg, "image/svg+xml", "sha1d.svg", &dir).unwrap();
 
-        let bodies = load_artifact_bodies(&[sample_meta(7, "image/svg+xml")], &dir);
+        let bodies = load_artifact_bodies(&[sample_meta("sha1d.svg", "image/svg+xml")], &dir);
         assert_eq!(bodies[0].body, svg);
     }
 
@@ -2175,9 +2320,57 @@ mod tests {
         let dir = temp_dir();
         let bytes: Vec<u8> = (0u8..=255).collect();
         let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-        write_artifact_body(&b64, "image/png", 8, &dir).unwrap();
+        write_artifact_body(&b64, "image/png", "sha1e.png", &dir).unwrap();
 
-        let bodies = load_artifact_bodies(&[sample_meta(8, "image/png")], &dir);
+        let bodies = load_artifact_bodies(&[sample_meta("sha1e.png", "image/png")], &dir);
         assert_eq!(bodies[0].body, b64);
+    }
+
+    // ── sha1_of_body ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn sha1_of_body_produces_hex_dot_ext() {
+        let id = sha1_of_body("<svg/>", "image/svg+xml");
+        assert!(id.ends_with(".svg"), "expected .svg extension: {id}");
+        let hex_part = id.strip_suffix(".svg").unwrap();
+        assert_eq!(hex_part.len(), 40, "sha1 hex should be 40 chars: {hex_part}");
+        assert!(hex_part.chars().all(|c| c.is_ascii_hexdigit()), "must be hex: {hex_part}");
+    }
+
+    #[test]
+    fn sha1_of_body_same_content_same_id() {
+        let id1 = sha1_of_body("<svg/>", "image/svg+xml");
+        let id2 = sha1_of_body("<svg/>", "image/svg+xml");
+        assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn sha1_of_body_different_content_different_id() {
+        let id1 = sha1_of_body("<svg>v1</svg>", "image/svg+xml");
+        let id2 = sha1_of_body("<svg>v2</svg>", "image/svg+xml");
+        assert_ne!(id1, id2);
+    }
+
+    // ── collect_epar_ids ─────────────────────────────────────────────────────
+
+    #[test]
+    fn collect_epar_ids_finds_single_ref() {
+        let content = "Some text ![alt](epar://abc.svg) more text";
+        let ids = collect_epar_ids(content);
+        assert_eq!(ids, vec!["abc.svg"]);
+    }
+
+    #[test]
+    fn collect_epar_ids_finds_multiple_refs() {
+        let content = "![a](epar://a.svg)\n\n![b](epar://b.png)";
+        let ids = collect_epar_ids(content);
+        assert!(ids.contains(&"a.svg".to_string()));
+        assert!(ids.contains(&"b.png".to_string()));
+    }
+
+    #[test]
+    fn collect_epar_ids_empty_for_no_refs() {
+        let ids = collect_epar_ids("No artifacts here.");
+        assert!(ids.is_empty());
     }
 }

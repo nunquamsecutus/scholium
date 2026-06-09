@@ -13,7 +13,7 @@ interface Props {
   onEndnote?: (phrase: string, range: Range) => void;
   onAppendix?: (phrase: string, range: Range) => void;
   onRewrite?: (phrase: string, range: Range) => void;
-  onRewriteConversation?: (rewriteId: number, range: Range) => void;
+  onRewriteConversation?: (rewriteId: string, range: Range) => void;
   onDrawPicture?: (phrase: string, range: Range) => void;
   onDrawDiagram?: (phrase: string, range: Range) => void;
   onChat?: (phrase: string, range: Range) => void;
@@ -27,7 +27,7 @@ export default function SelectionToolbar(props: Props) {
   const [range, setRange] = createSignal<Range | null>(null);
   const [pos, setPos] = createSignal({ top: 0, left: 0 });
   const [mode, setMode] = createSignal<Mode>("primary");
-  const [touchedRewriteId, setTouchedRewriteId] = createSignal<number | null>(
+  const [touchedRewriteId, setTouchedRewriteId] = createSignal<string | null>(
     null,
   );
 
@@ -43,12 +43,11 @@ export default function SelectionToolbar(props: Props) {
   function findTouchedRewriteId(
     r: Range,
     container: HTMLElement,
-  ): number | null {
+  ): string | null {
     const spans = container.querySelectorAll("[data-rewrite-id]");
     for (const span of Array.from(spans)) {
       if (r.intersectsNode(span)) {
-        const id = Number((span as HTMLElement).dataset.rewriteId);
-        return Number.isFinite(id) ? id : null;
+        return (span as HTMLElement).dataset.rewriteId ?? null;
       }
     }
     return null;

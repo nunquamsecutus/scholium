@@ -37,7 +37,7 @@ interface NoteFromBackend {
 }
 
 interface ArtifactFromBackend {
-  id: number;
+  id: string;
   mimeType: string;
   semanticType: string;
   ctime: string;
@@ -66,7 +66,7 @@ interface ChatMessage {
 }
 
 interface RewriteDialogState {
-  rewriteId: number;
+  rewriteId: string;
   passage: string;
   context: string;
   messages: ChatMessage[];
@@ -147,7 +147,7 @@ export default function BookView(props: Props) {
   // The artifact whose controls overlay is currently shown (id + the figure's
   // viewport rect for positioning), and whether the delete confirm is open.
   const [activeArtifact, setActiveArtifact] = createSignal<{
-    id: number;
+    id: string;
     rect: { top: number; left: number; width: number; height: number };
   } | null>(null);
   const [confirmingArtifactDelete, setConfirmingArtifactDelete] =
@@ -155,7 +155,7 @@ export default function BookView(props: Props) {
   // Edit-image modal: the artifact id + surrounding context, the instruction
   // text, and whether the regenerate request is in flight.
   const [editArtifact, setEditArtifact] = createSignal<{
-    id: number;
+    id: string;
     context: string;
   } | null>(null);
   const [editInstruction, setEditInstruction] = createSignal("");
@@ -364,7 +364,7 @@ export default function BookView(props: Props) {
       const figure = target?.closest(".artifact") as HTMLElement | null;
       if (figure) {
         e.preventDefault();
-        const id = Number(figure.dataset.artifactId);
+        const id = figure.dataset.artifactId ?? "";
         const rect = figure.getBoundingClientRect();
         setActiveArtifact({
           id,
@@ -411,7 +411,7 @@ export default function BookView(props: Props) {
     onCleanup(() => article.removeEventListener("click", onClick));
   });
 
-  async function handleDeleteArtifact(artifactId: number) {
+  async function handleDeleteArtifact(artifactId: string) {
     setActiveArtifact(null);
     await runContentCommand("Removing image…", "delete_artifact", {
       chapterId: selectedId(),
@@ -419,7 +419,7 @@ export default function BookView(props: Props) {
     });
   }
 
-  function openEditArtifact(artifactId: number) {
+  function openEditArtifact(artifactId: string) {
     const article = articleRef();
     const figure = article?.querySelector(
       `[data-artifact-id="${artifactId}"]`,
@@ -435,7 +435,7 @@ export default function BookView(props: Props) {
     setEditInstruction("");
   }
 
-  function handleZoomArtifact(artifactId: number) {
+  function handleZoomArtifact(artifactId: string) {
     const article = articleRef();
     const figure = article?.querySelector(
       `[data-artifact-id="${artifactId}"]`,
@@ -604,7 +604,7 @@ export default function BookView(props: Props) {
     });
   }
 
-  function handleRewriteConversation(rewriteId: number, range: Range) {
+  function handleRewriteConversation(rewriteId: string, range: Range) {
     const article = articleRef();
     if (!article) return;
     const span = article.querySelector(

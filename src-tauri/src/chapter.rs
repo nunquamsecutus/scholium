@@ -94,18 +94,19 @@ mod tests {
                         id: "ch-01".to_string(),
                         title: "Stellar Evolution".to_string(),
                         description: Some("How stars live and die.".to_string()),
-                        file: "chapters/01-stellar-evolution.edupage".to_string(),
+                        file: "chapters/01-stellar-evolution.md".to_string(),
                         status: ChapterStatus::Planned,
                     },
                     Chapter {
                         id: "ch-02".to_string(),
                         title: "Gravitational Collapse".to_string(),
                         description: Some("The mechanics of collapse.".to_string()),
-                        file: "chapters/02-gravitational-collapse.edupage".to_string(),
+                        file: "chapters/02-gravitational-collapse.md".to_string(),
                         status: ChapterStatus::Planned,
                     },
                 ],
             },
+            artifacts: vec![],
         }
     }
 

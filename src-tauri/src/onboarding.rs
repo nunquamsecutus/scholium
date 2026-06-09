@@ -101,7 +101,7 @@ pub fn parse_plan(response: &str) -> Result<GeneratedPlan, String> {
             let id = uuid::Uuid::new_v4().to_string();
             Chapter {
                 id,
-                file: format!("chapters/{n:02}-{}.edupage", slugify(&ch.title)),
+                file: format!("chapters/{n:02}-{}.md", slugify(&ch.title)),
                 title: ch.title,
                 description: Some(ch.description),
                 status: ChapterStatus::Planned,
@@ -167,7 +167,7 @@ mod tests {
         assert_eq!(plan.description, "Explore the universe's most extreme objects.");
         assert_eq!(plan.lesson_plan.chapters.len(), 2);
         assert!(!plan.lesson_plan.chapters[0].id.is_empty());
-        assert!(plan.lesson_plan.chapters[0].file.ends_with(".edupage"));
+        assert!(plan.lesson_plan.chapters[0].file.ends_with(".md"));
         assert!(plan.lesson_plan.chapters[0].file.contains("stellar-evolution"));
     }
 

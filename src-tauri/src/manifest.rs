@@ -1,3 +1,4 @@
+use crate::edupage::ArtifactMeta;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -7,6 +8,12 @@ pub struct Manifest {
     pub version: u32,
     pub metadata: Metadata,
     pub lesson_plan: LessonPlan,
+    /// All artifact (image/diagram) metadata for the book. Stored here at the
+    /// manifest level so IDs are unique across chapters and content-addressed
+    /// via SHA1. Each chapter's body references artifacts via `epar://sha1.ext`
+    /// URIs.
+    #[serde(default)]
+    pub artifacts: Vec<ArtifactMeta>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,10 +97,11 @@ mod tests {
                     id: "ch-01".to_string(),
                     title: "Stellar Evolution".to_string(),
                     description: None,
-                    file: "chapters/01-stellar-evolution.edupage".to_string(),
+                    file: "chapters/01-stellar-evolution.md".to_string(),
                     status: ChapterStatus::Planned,
                 }],
             },
+            artifacts: vec![],
         }
     }
 

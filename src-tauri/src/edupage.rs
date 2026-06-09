@@ -1,74 +1,47 @@
-use serde::{Deserialize, Serialize};
-use sha1::{Digest, Sha1};
-use std::collections::HashMap;
+//! Chapter file format: JSON frontmatter + markdown body + footnote definitions.
+//!
+//! # File format
+//!
+//! ```text
+//! ---
+//! {"nextNoteId":2,"notes":[{"id":1,"type":"definition","word":"blackhole","ctime":"..."}]}
+//! ---
+//!
+//! # Chapter Title
+//!
+//! Content here. Blackhole[^*1] is a fascinating object.
+//!
+//! [^*1]: A region of spacetime where gravity is so strong that nothing can escape.
+//! ```
+//!
+//! Footnote definition lines follow `[^<marker><id>]: body`.
+//! Multi-line bodies use 4-space continuation.  The `[^...]` anchor syntax is
+//! **not** standard CommonMark; pulldown-cmark (used without the `footnotes`
+//! feature flag) renders these as plain text.  `read()` strips definition lines
+//! before passing content to the renderer.
+//!
+//! # Artifact references
+//!
+//! Artifacts (images, diagrams) are stored as `![alt](epar://sha1.ext)` in the
+//! markdown body.  The SHA1 is content-addressed: `sha1(file_bytes).ext`.
+//! Artifact metadata lives in the book manifest (`Manifest.artifacts`), not in
+//! the chapter file.
 
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct EdupageHeader {
-    pub version: u32,
-    pub id: String,
-    pub title: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    pub revisions: Vec<RevisionMeta>,
-    pub assets: Vec<AssetMeta>,
-    #[serde(default)]
-    pub notes: Vec<NoteMeta>,
-    /// Monotonically increasing id allocator for notes; never decreases, so
-    /// deleted ids are never re-issued.
-    #[serde(default = "default_next_note_id")]
-    pub next_note_id: u32,
-    /// Monotonically increasing id allocator for rewrite spans. Same rule
-    /// as next_note_id — ids are never reused.
-    #[serde(default = "default_next_rewrite_id")]
-    pub next_rewrite_id: u32,
-    #[serde(default)]
-    pub artifacts: Vec<ArtifactMeta>,
-    /// Monotonically increasing id allocator for artifacts. Never reused.
-    #[serde(default = "default_next_artifact_id")]
-    pub next_artifact_id: u32,
-}
+use serde::{Deserialize, Serialize};
+
+// ── Types ─────────────────────────────────────────────────────────────────────
 
 fn default_next_note_id() -> u32 {
     1
 }
 
-fn default_next_rewrite_id() -> u32 {
-    1
-}
-
-fn default_next_artifact_id() -> u32 {
-    1
-}
-
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
-pub struct RevisionMeta {
-    pub id: String,
-    pub ctime: String,
-    pub action_id: String,
-    #[serde(rename = "type")]
-    pub revision_type: RevisionType,
-    pub line_start: usize,
-    pub line_end: Option<usize>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub enum RevisionType {
-    #[serde(rename = "ADD")]
-    Add,
-    #[serde(rename = "EDIT")]
-    Edit,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AssetMeta {
-    pub id: String,
-    pub ctime: String,
-    pub mime_type: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
+pub struct ChapterFrontmatter {
+    #[serde(default = "default_next_note_id")]
+    pub next_note_id: u32,
+    #[serde(default)]
+    pub notes: Vec<NoteMeta>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,9 +54,8 @@ pub enum NoteType {
     Endnote,
 }
 
-/// The marker character that follows `[^` in the source-level anchor for a
-/// note of the given type. Asterisk for definitions, dagger for footnotes,
-/// double-dagger for endnotes.
+/// The marker character that follows `[^` in the source-level anchor.
+/// Asterisk for definitions, dagger for footnotes, double-dagger for endnotes.
 pub fn marker_char(note_type: &NoteType) -> char {
     match note_type {
         NoteType::Definition => '*',
@@ -118,8 +90,6 @@ pub struct NoteWithBody {
 }
 
 impl NoteWithBody {
-    /// Return the note type as a lowercase string slice, matching the JSON
-    /// serialisation.  Used by the renderer to filter endnotes.
     pub fn note_type_str(&self) -> &'static str {
         match self.note_type {
             NoteType::Definition => "definition",
@@ -129,27 +99,32 @@ impl NoteWithBody {
     }
 }
 
+/// Artifact metadata stored at the manifest level.
+///
+/// `id` is `"<sha1hex>.<ext>"` (content-addressed).  The file on disk lives
+/// at `images/<id>` inside the book directory.  In chapter markdown, the
+/// artifact is referenced as `![alt](epar://<id>)`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ArtifactMeta {
-    pub id: u32,
+    /// Content-addressed ID: `sha1hex.ext`, e.g., `"abc123def.svg"`.
+    pub id: String,
     pub mime_type: String,
-    /// "image" for now; later "diagram", "chart", etc.
+    /// "image" | "diagram" etc.
     pub semantic_type: String,
     pub ctime: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub caption: Option<String>,
-    /// width / height from the SVG viewBox, precomputed so the renderer
-    /// doesn't have to re-parse on every load. Drives block vs float layout.
+    /// width / height from the SVG viewBox. Drives block vs float layout.
     pub aspect_ratio: f32,
-    /// The text the artifact was generated from (for re-generation later).
+    /// The text the artifact was generated from (for re-generation).
     pub source: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ArtifactWithBody {
-    pub id: u32,
+    pub id: String,
     pub mime_type: String,
     pub semantic_type: String,
     pub ctime: String,
@@ -159,142 +134,189 @@ pub struct ArtifactWithBody {
     pub body: String,
 }
 
+/// Parsed chapter: markdown content (footnote defs stripped) and notes with
+/// their bodies.  Artifact metadata lives in the manifest, not here.
 #[derive(Debug, Serialize)]
 pub struct EduPage {
     pub content: String,
     pub notes: Vec<NoteWithBody>,
-    /// Artifact metadata only.  Bodies (SVG text / base64-encoded raster) live
-    /// as separate files in the book's `images/` directory and are loaded by
-    /// the caller when needed for rendering.
-    pub artifacts: Vec<ArtifactMeta>,
 }
 
-fn sha1_hex(content: &str) -> String {
-    let mut h = Sha1::new();
-    h.update(content.as_bytes());
-    format!("{:x}", h.finalize())
+// ── Private format helpers ────────────────────────────────────────────────────
+
+/// Parse frontmatter from a raw chapter file.
+/// Returns `(frontmatter, body_including_footnote_defs)`.
+fn parse_raw(raw: &str) -> Result<(ChapterFrontmatter, String), String> {
+    let raw = raw.trim_start();
+    let rest = raw
+        .strip_prefix("---\n")
+        .ok_or("missing frontmatter opening ---")?;
+    let (json, rest) = rest
+        .split_once("\n---\n")
+        .ok_or("missing frontmatter closing ---")?;
+    let fm: ChapterFrontmatter =
+        serde_json::from_str(json).map_err(|e| format!("invalid chapter frontmatter: {e}"))?;
+    // Strip leading blank line after the closing `---`.
+    let body = rest.trim_start_matches('\n').to_string();
+    Ok((fm, body))
 }
 
-fn delimiter(file_id: &str, sha1: &str) -> String {
-    format!("======! {}|{} !======", file_id, sha1)
-}
+/// Serialize frontmatter + content + footnote defs back to raw file bytes.
+fn write_raw(fm: &ChapterFrontmatter, content: &str, notes: &[NoteWithBody]) -> String {
+    let json = serde_json::to_string(fm).expect("serialize frontmatter");
+    let mut body = content.trim_end().to_string();
 
-fn note_delimiter(file_id: &str, note_id: u32) -> String {
-    format!("======! {}|NOTE:{} !======", file_id, note_id)
-}
-
-
-fn parse_delimiter(line: &str) -> Option<(String, String)> {
-    let inner = line.trim().strip_prefix("======!")?.strip_suffix("!======")?;
-    let inner = inner.trim();
-    inner
-        .split_once('|')
-        .map(|(a, b)| (a.trim().to_string(), b.trim().to_string()))
-}
-
-pub fn create(file_id: &str, title: &str, description: Option<&str>, content: &str) -> String {
-    let sha1 = sha1_hex(content);
-    let ctime = chrono::Utc::now().to_rfc3339();
-    let action_id = uuid::Uuid::new_v4().to_string();
-    let line_end = content.lines().count();
-
-    let header = EdupageHeader {
-        version: 1,
-        id: file_id.to_string(),
-        title: title.to_string(),
-        description: description.map(str::to_string),
-        revisions: vec![RevisionMeta {
-            id: sha1.clone(),
-            ctime,
-            action_id,
-            revision_type: RevisionType::Add,
-            line_start: 1,
-            line_end: Some(line_end),
-        }],
-        assets: vec![],
-        notes: vec![],
-        next_note_id: 1,
-        next_rewrite_id: 1,
-        artifacts: vec![],
-        next_artifact_id: 1,
+    let note_defs: Vec<NoteWithBody> = {
+        // Write in note-id order.
+        let mut ordered = notes.to_vec();
+        ordered.sort_by_key(|n| n.id);
+        ordered
     };
 
-    let header_json = serde_json::to_string_pretty(&header).expect("edupage header serialization");
-    format!("{}\n{}\n{}", header_json, delimiter(file_id, &sha1), content)
-}
-
-/// Parse the header and all delimited blocks. Block keys are either revision
-/// sha1s or `NOTE:<id>` markers.
-fn parse_blocks(raw: &str) -> Result<(EdupageHeader, HashMap<String, String>), String> {
-    let lines: Vec<&str> = raw.lines().collect();
-    let delimiters: Vec<(usize, String, String)> = lines
-        .iter()
-        .enumerate()
-        .filter_map(|(i, line)| parse_delimiter(line).map(|(uuid, key)| (i, uuid, key)))
-        .collect();
-
-    if delimiters.is_empty() {
-        return Err("no revision delimiters found in edupage".to_string());
-    }
-
-    let header_end = delimiters[0].0;
-    let header: EdupageHeader = serde_json::from_str(&lines[..header_end].join("\n"))
-        .map_err(|e| format!("invalid edupage header: {e}"))?;
-
-    let mut blocks: HashMap<String, String> = HashMap::new();
-    for (idx, (line_idx, _, key)) in delimiters.iter().enumerate() {
-        let start = line_idx + 1;
-        let end = if idx + 1 < delimiters.len() {
-            delimiters[idx + 1].0
-        } else {
-            lines.len()
-        };
-        blocks.insert(key.clone(), lines[start..end].join("\n"));
-    }
-
-    Ok((header, blocks))
-}
-
-pub fn reconstruct(raw: &str) -> Result<String, String> {
-    let (header, blocks) = parse_blocks(raw)?;
-
-    let mut doc: Vec<String> = Vec::new();
-    for rev in &header.revisions {
-        let content = blocks
-            .get(&rev.id)
-            .ok_or_else(|| format!("missing content block for revision {}", rev.id))?;
-        let new_lines: Vec<String> = content.lines().map(str::to_string).collect();
-
-        match rev.revision_type {
-            RevisionType::Add => {
-                let at = (rev.line_start - 1).min(doc.len());
-                for (i, line) in new_lines.into_iter().enumerate() {
-                    doc.insert(at + i, line);
-                }
-            }
-            RevisionType::Edit => {
-                let start = (rev.line_start - 1).min(doc.len());
-                let end = rev.line_end.map(|e| e.min(doc.len())).unwrap_or(start);
-                doc.splice(start..end, new_lines);
-            }
+    if !note_defs.is_empty() {
+        body.push_str("\n\n");
+        for note in &note_defs {
+            body.push_str(&format_footnote_def(note));
+            body.push('\n');
         }
     }
 
-    Ok(doc.join("\n"))
+    format!("---\n{}\n---\n\n{}", json, body)
 }
 
-/// Read the full edupage: reconstructed markdown content plus notes with
-/// their bodies, joined by id.
-pub fn read(raw: &str) -> Result<EduPage, String> {
-    let (header, blocks) = parse_blocks(raw)?;
-    let content = reconstruct(raw)?;
+/// Format a footnote definition block for a note.
+///
+/// Single-line bodies: `[^*1]: body`
+/// Multi-line bodies: first line as above, continuation with 4-space indent.
+fn format_footnote_def(note: &NoteWithBody) -> String {
+    let marker = marker_char(&note.note_type);
+    let mut lines = note.body.lines();
+    let first = lines.next().unwrap_or("");
+    let mut result = format!("[^{}{}]: {}", marker, note.id, first);
+    for line in lines {
+        result.push('\n');
+        result.push_str("    ");
+        result.push_str(line);
+    }
+    result
+}
 
-    let notes: Vec<NoteWithBody> = header
-        .notes
+/// Parse a footnote definition header line.
+/// Returns `(marker_char, note_id, body_text)` if the line matches.
+fn parse_footnote_def_header(line: &str) -> Option<(char, u32, &str)> {
+    let rest = line.strip_prefix("[^")?;
+    let marker = rest.chars().next()?;
+    if !matches!(marker, '*' | '†' | '‡') {
+        return None;
+    }
+    let after_marker = &rest[marker.len_utf8()..];
+    // Expect `<digits>]: ` or `<digits>]:` at end-of-line
+    let colon_bracket = after_marker.find("]:")?;
+    let id_str = &after_marker[..colon_bracket];
+    if !id_str.chars().all(|c| c.is_ascii_digit()) || id_str.is_empty() {
+        return None;
+    }
+    let id: u32 = id_str.parse().ok()?;
+    let body_start = colon_bracket + 2; // skip "]:"
+    let body = after_marker[body_start..].trim_start_matches(' ');
+    Some((marker, id, body))
+}
+
+/// Split a body string (after frontmatter) into:
+/// - `content`: the markdown without footnote definitions
+/// - `defs`: `(marker_char, note_id, body_text)` for each def found at the end
+///
+/// Scans bottom-up so we can identify the footnote section without knowing
+/// its extent in advance.  Because continuation lines (`    body`) appear
+/// *after* their header in the file they are encountered *before* the header
+/// when scanning backwards; we buffer them and attach them when the header
+/// is found.  If buffered continuations are never claimed by a header (i.e. we
+/// hit blank lines or regular content before finding one) they are returned to
+/// the content section.
+fn extract_footnote_defs(body: &str) -> (String, Vec<(char, u32, String)>) {
+    let lines: Vec<&str> = body.lines().collect();
+    let mut defs: Vec<(char, u32, String)> = Vec::new();
+    let mut current: Option<(char, u32, String)> = None;
+    // Continuations encountered bottom-up before their header is found.
+    let mut pending: Vec<String> = Vec::new();
+    let mut i = lines.len();
+
+    // Skip trailing blank lines.
+    while i > 0 && lines[i - 1].trim().is_empty() {
+        i -= 1;
+    }
+
+    // Scan bottom-up collecting def lines.
+    while i > 0 {
+        let line = lines[i - 1];
+        if let Some(stripped) = line.strip_prefix("    ") {
+            // Continuation line — buffer it for the header we'll see next.
+            pending.insert(0, stripped.to_string());
+            i -= 1;
+        } else if let Some((marker, id, first_line)) = parse_footnote_def_header(line) {
+            if let Some(prev) = current.take() {
+                defs.push(prev);
+            }
+            // Attach buffered continuation lines (already in top-to-bottom order).
+            let mut body_text = first_line.to_string();
+            for cont in &pending {
+                body_text.push('\n');
+                body_text.push_str(cont);
+            }
+            pending.clear();
+            current = Some((marker, id, body_text));
+            i -= 1;
+        } else if line.trim().is_empty() {
+            if pending.is_empty() {
+                // Blank lines between defs are allowed.
+                i -= 1;
+            } else {
+                // Blank line with unclaimed continuations — not a def section.
+                i += pending.len();
+                pending.clear();
+                break;
+            }
+        } else {
+            // Regular content line.
+            if !pending.is_empty() {
+                // Restore continuation lines back into content.
+                i += pending.len();
+                pending.clear();
+            }
+            break;
+        }
+    }
+    if let Some(d) = current {
+        defs.push(d);
+    }
+    defs.reverse(); // restore original (top-to-bottom) order
+
+    // Content is everything up to the start of the def section.
+    let content_end = {
+        let mut e = i;
+        while e > 0 && lines[e - 1].trim().is_empty() {
+            e -= 1;
+        }
+        e
+    };
+    let content = lines[..content_end].join("\n");
+    (content, defs)
+}
+
+/// Rebuild NoteWithBody list from metadata + parsed def list.
+fn rebuild_notes_with_bodies(
+    notes: &[NoteMeta],
+    defs: &[(char, u32, String)],
+) -> Vec<NoteWithBody> {
+    notes
         .iter()
         .map(|meta| {
-            let key = format!("NOTE:{}", meta.id);
-            let body = blocks.get(&key).cloned().unwrap_or_default();
+            let marker = marker_char(&meta.note_type);
+            let body = defs
+                .iter()
+                .find(|(m, id, _)| *m == marker && *id == meta.id)
+                .map(|(_, _, b)| b.clone())
+                .unwrap_or_default();
             NoteWithBody {
                 id: meta.id,
                 note_type: meta.note_type.clone(),
@@ -303,392 +325,14 @@ pub fn read(raw: &str) -> Result<EduPage, String> {
                 body,
             }
         })
-        .collect();
-
-    Ok(EduPage {
-        content,
-        notes,
-        artifacts: header.artifacts.clone(),
-    })
+        .collect()
 }
 
-fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-}
+// ── Byte-position helpers ─────────────────────────────────────────────────────
 
-/// Replace the entire `<span data-rewrite-id="<rewrite_id>">…</span>` with a
-/// new span carrying the next monotonic id and `new_replacement` as its
-/// content. Recorded as a single-line EDIT revision. Assumes the rewrite
-/// span sits on a single line (true for content produced by
-/// `rewrite_passage`).
-pub fn rewrite_existing_span(
-    raw: &str,
-    rewrite_id: u32,
-    new_replacement: &str,
-) -> Result<(String, u32), String> {
-    let (mut header, _) = parse_blocks(raw)?;
-    let new_id = header.next_rewrite_id;
-    header.next_rewrite_id = new_id + 1;
-    let now = chrono::Utc::now().to_rfc3339();
-
-    let content = reconstruct(raw)?;
-    let open_marker = format!(r#"<span data-rewrite-id="{}">"#, rewrite_id);
-    let close_marker = "</span>";
-
-    let mut found: Option<(usize, String)> = None;
-    for (idx, line) in content.lines().enumerate() {
-        if let Some(open_pos) = line.find(&open_marker) {
-            let inner_start = open_pos + open_marker.len();
-            if let Some(close_rel) = line[inner_start..].find(close_marker) {
-                let span_end = inner_start + close_rel + close_marker.len();
-                let new_span = format!(
-                    r#"<span data-rewrite-id="{}">{}</span>"#,
-                    new_id,
-                    html_escape(new_replacement),
-                );
-                let new_line =
-                    format!("{}{}{}", &line[..open_pos], new_span, &line[span_end..]);
-                found = Some((idx, new_line));
-                break;
-            }
-        }
-    }
-    let (line_idx, new_line) =
-        found.ok_or_else(|| format!("rewrite span {} not found", rewrite_id))?;
-
-    let line_number = line_idx + 1;
-    let new_sha1 = sha1_hex(&new_line);
-    let file_id = header.id.clone();
-
-    header.revisions.push(RevisionMeta {
-        id: new_sha1.clone(),
-        ctime: now,
-        action_id: uuid::Uuid::new_v4().to_string(),
-        revision_type: RevisionType::Edit,
-        line_start: line_number,
-        line_end: Some(line_number),
-    });
-
-    let header_json = serde_json::to_string_pretty(&header).expect("header serialization");
-    let lines: Vec<&str> = raw.lines().collect();
-    let body_start = lines
-        .iter()
-        .position(|l| parse_delimiter(l).is_some())
-        .ok_or("no delimiter in edupage")?;
-    let existing_body = lines[body_start..].join("\n");
-
-    let mut new_file = header_json;
-    new_file.push('\n');
-    new_file.push_str(&existing_body);
-    new_file.push('\n');
-    new_file.push_str(&delimiter(&file_id, &new_sha1));
-    new_file.push('\n');
-    new_file.push_str(&new_line);
-
-    Ok((new_file, new_id))
-}
-
-/// Remove an artifact: drop its metadata, strip the ARTIFACT block, and
-/// remove the `![alt](epar://<id>)` image from the body via an EDIT revision.
-/// Block images (on their own paragraph) collapse back to the preceding
-/// paragraph; inline images are spliced out of their line (consuming the
-/// leading space they were inserted with).
-pub fn delete_artifact(raw: &str, artifact_id: u32) -> Result<String, String> {
-    let (mut header, _) = parse_blocks(raw)?;
-    let art_idx = header
-        .artifacts
-        .iter()
-        .position(|a| a.id == artifact_id)
-        .ok_or_else(|| format!("artifact {} not found", artifact_id))?;
-    let now = chrono::Utc::now().to_rfc3339();
-    let content = reconstruct(raw)?;
-    let lines: Vec<&str> = content.lines().collect();
-    let url = format!("(epar://{})", artifact_id);
-
-    // (start_0, end_0_exclusive, new_lines) for the EDIT revision.
-    let mut edit: Option<(usize, usize, Vec<String>)> = None;
-    for (i, line) in lines.iter().enumerate() {
-        let Some(url_pos) = line.find(&url) else { continue };
-        let bracket = line[..url_pos]
-            .rfind("![")
-            .ok_or("malformed image markdown")?;
-        let img_end = url_pos + url.len();
-        let mut img_start = bracket;
-        if img_start > 0 && line.as_bytes()[img_start - 1] == b' ' {
-            img_start -= 1;
-        }
-        let cleaned = format!("{}{}", &line[..img_start], &line[img_end..]);
-        if cleaned.trim().is_empty() {
-            // Block image: collapse [paragraph, blank, image] back to [paragraph].
-            if i >= 2 && lines[i - 1].trim().is_empty() {
-                edit = Some((i - 2, i + 1, vec![lines[i - 2].to_string()]));
-            } else {
-                edit = Some((i, i + 1, vec![]));
-            }
-        } else {
-            edit = Some((i, i + 1, vec![cleaned]));
-        }
-        break;
-    }
-    let (start_0, end_0, new_lines) = edit
-        .ok_or_else(|| format!("image marker for artifact {} not found in body", artifact_id))?;
-
-    let new_block = new_lines.join("\n");
-    let new_sha1 = sha1_hex(&new_block);
-    let file_id = header.id.clone();
-
-    header.revisions.push(RevisionMeta {
-        id: new_sha1.clone(),
-        ctime: now,
-        action_id: uuid::Uuid::new_v4().to_string(),
-        revision_type: RevisionType::Edit,
-        line_start: start_0 + 1,
-        line_end: Some(end_0),
-    });
-    header.artifacts.remove(art_idx);
-
-    let header_json = serde_json::to_string_pretty(&header).expect("header serialization");
-    let raw_lines: Vec<&str> = raw.lines().collect();
-    let delimiters: Vec<(usize, String, String)> = raw_lines
-        .iter()
-        .enumerate()
-        .filter_map(|(i, line)| parse_delimiter(line).map(|(uuid, key)| (i, uuid, key)))
-        .collect();
-
-    let mut new_file = header_json;
-    new_file.push('\n');
-    for (idx, (line_idx, _, key)) in delimiters.iter().enumerate() {
-        if key.starts_with("ARTIFACT:") {
-            continue; // bodies now live on disk; no block to preserve
-        }
-        let start = *line_idx;
-        let end = if idx + 1 < delimiters.len() {
-            delimiters[idx + 1].0
-        } else {
-            raw_lines.len()
-        };
-        new_file.push_str(&raw_lines[start..end].join("\n"));
-        new_file.push('\n');
-    }
-    new_file.push_str(&delimiter(&file_id, &new_sha1));
-    new_file.push('\n');
-    new_file.push_str(&new_block);
-
-    Ok(new_file)
-}
-
-/// Replace an artifact's SVG and caption, updating its aspect ratio. If the
-/// aspect ratio crosses the block/float boundary (>= 1 vs < 1) the body
-/// marker is repositioned with an EDIT revision: block → inline appends the
-/// image to its paragraph; inline → block lifts it onto its own paragraph.
-/// Otherwise only the ARTIFACT block and metadata change.
-pub fn regenerate_artifact(
-    raw: &str,
-    artifact_id: u32,
-    new_mime_type: &str,
-    new_caption: &str,
-    new_aspect: f32,
-) -> Result<(String, ArtifactMeta), String> {
-    let (mut header, _) = parse_blocks(raw)?;
-    let idx = header
-        .artifacts
-        .iter()
-        .position(|a| a.id == artifact_id)
-        .ok_or_else(|| format!("artifact {} not found", artifact_id))?;
-    let old_wide = header.artifacts[idx].aspect_ratio >= 1.0;
-    let new_wide = new_aspect >= 1.0;
-    let now = chrono::Utc::now().to_rfc3339();
-
-    header.artifacts[idx].aspect_ratio = new_aspect;
-    header.artifacts[idx].mime_type = new_mime_type.to_string();
-    header.artifacts[idx].caption = if new_caption.trim().is_empty() {
-        None
-    } else {
-        Some(new_caption.trim().to_string())
-    };
-    let updated = header.artifacts[idx].clone();
-    let file_id = header.id.clone();
-
-    // Reposition the body marker only when the placement class flips.
-    let mut extra_edit: Option<(String, String)> = None;
-    if old_wide != new_wide {
-        let content = reconstruct(raw)?;
-        let lines: Vec<&str> = content.lines().collect();
-        let url = format!("(epar://{})", artifact_id);
-        let alt = sanitize_alt(new_caption);
-        let image_md = format!("![{}](epar://{})", alt, artifact_id);
-
-        let mut found: Option<(usize, usize, Vec<String>)> = None;
-        for (i, line) in lines.iter().enumerate() {
-            let Some(url_pos) = line.find(&url) else { continue };
-            let bracket = line[..url_pos]
-                .rfind("![")
-                .ok_or("malformed image markdown")?;
-            let img_end = url_pos + url.len();
-            let mut img_start = bracket;
-            if img_start > 0 && line.as_bytes()[img_start - 1] == b' ' {
-                img_start -= 1;
-            }
-            let cleaned = format!("{}{}", &line[..img_start], &line[img_end..]);
-            if new_wide {
-                // inline → block: drop the inline image, lift onto its own paragraph.
-                let para = cleaned.trim_end().to_string();
-                found = Some((i, i + 1, vec![para, String::new(), image_md.clone()]));
-            } else if i >= 2 && lines[i - 1].trim().is_empty() {
-                // block → inline: append to the preceding paragraph.
-                found = Some((i - 2, i + 1, vec![format!("{} {}", lines[i - 2], image_md)]));
-            } else {
-                found = Some((i, i + 1, vec![image_md.clone()]));
-            }
-            break;
-        }
-        let (start_0, end_0, new_lines) = found
-            .ok_or_else(|| format!("image marker for artifact {} not found", artifact_id))?;
-        let block = new_lines.join("\n");
-        let sha1 = sha1_hex(&block);
-        header.revisions.push(RevisionMeta {
-            id: sha1.clone(),
-            ctime: now,
-            action_id: uuid::Uuid::new_v4().to_string(),
-            revision_type: RevisionType::Edit,
-            line_start: start_0 + 1,
-            line_end: Some(end_0),
-        });
-        extra_edit = Some((sha1, block));
-    }
-
-    let header_json = serde_json::to_string_pretty(&header).expect("header serialization");
-    let raw_lines: Vec<&str> = raw.lines().collect();
-    let delimiters: Vec<(usize, String, String)> = raw_lines
-        .iter()
-        .enumerate()
-        .filter_map(|(i, line)| parse_delimiter(line).map(|(uuid, key)| (i, uuid, key)))
-        .collect();
-
-    let mut new_file = header_json;
-    new_file.push('\n');
-    for (di, (line_idx, _, key)) in delimiters.iter().enumerate() {
-        if key.starts_with("ARTIFACT:") {
-            continue; // bodies now live on disk
-        }
-        let start = *line_idx;
-        let end = if di + 1 < delimiters.len() {
-            delimiters[di + 1].0
-        } else {
-            raw_lines.len()
-        };
-        new_file.push_str(&raw_lines[start..end].join("\n"));
-        new_file.push('\n');
-    }
-    if let Some((sha1, block)) = extra_edit {
-        new_file.push_str(&delimiter(&file_id, &sha1));
-        new_file.push('\n');
-        new_file.push_str(&block);
-    }
-
-    Ok((new_file, updated))
-}
-
-/// Strip characters that would break markdown image alt text / link syntax.
-fn sanitize_alt(s: &str) -> String {
-    s.chars()
-        .filter(|c| !matches!(c, '[' | ']' | '(' | ')' | '\n' | '\r'))
-        .collect::<String>()
-        .trim()
-        .to_string()
-}
-
-/// Remove a note: drops the metadata, strips the NOTE block, and appends a
-/// new EDIT revision that removes the `[^*<id>]` anchor from the body.
-pub fn delete_note(raw: &str, note_id: u32) -> Result<String, String> {
-    let (mut header, _blocks) = parse_blocks(raw)?;
-
-    let note_idx = header
-        .notes
-        .iter()
-        .position(|n| n.id == note_id)
-        .ok_or_else(|| format!("note {} not found", note_id))?;
-    let note_type = header.notes[note_idx].note_type.clone();
-
-    let now = chrono::Utc::now().to_rfc3339();
-    let content = reconstruct(raw)?;
-    let anchor = anchor_text(&note_type, note_id);
-
-    let (line_idx, new_line) = content
-        .lines()
-        .enumerate()
-        .find_map(|(i, line)| {
-            if line.contains(&anchor) {
-                Some((i, line.replace(&anchor, "")))
-            } else {
-                None
-            }
-        })
-        .ok_or_else(|| format!("anchor for note {} not found in body", note_id))?;
-    let line_number = line_idx + 1;
-
-    let new_sha1 = sha1_hex(&new_line);
-    let file_id = header.id.clone();
-
-    header.revisions.push(RevisionMeta {
-        id: new_sha1.clone(),
-        ctime: now,
-        action_id: uuid::Uuid::new_v4().to_string(),
-        revision_type: RevisionType::Edit,
-        line_start: line_number,
-        line_end: Some(line_number),
-    });
-    header.notes.remove(note_idx);
-
-    let header_json = serde_json::to_string_pretty(&header).expect("header serialization");
-    let deleted_key = format!("NOTE:{}", note_id);
-
-    let lines: Vec<&str> = raw.lines().collect();
-    let delimiters: Vec<(usize, String, String)> = lines
-        .iter()
-        .enumerate()
-        .filter_map(|(i, line)| parse_delimiter(line).map(|(uuid, key)| (i, uuid, key)))
-        .collect();
-
-    let mut new_file = header_json;
-    new_file.push('\n');
-    for (idx, (line_idx, _, key)) in delimiters.iter().enumerate() {
-        if key == &deleted_key {
-            continue;
-        }
-        let start = *line_idx;
-        let end = if idx + 1 < delimiters.len() {
-            delimiters[idx + 1].0
-        } else {
-            lines.len()
-        };
-        new_file.push_str(&lines[start..end].join("\n"));
-        new_file.push('\n');
-    }
-    new_file.push_str(&delimiter(&file_id, &new_sha1));
-    new_file.push('\n');
-    new_file.push_str(&new_line);
-
-    Ok(new_file)
-}
-
-// ── Byte-position operations ──────────────────────────────────────────────────
-//
-// These replace the text-search / occurrence-index approach used by the old
-// public API.  The Rust HTML renderer (`render.rs`) annotates every text span
-// with `data-src-start` / `data-src-end` UTF-8 byte offsets into the
-// reconstructed markdown.  The frontend extracts those offsets when the user
-// makes a selection and sends them here instead of (selection text,
-// occurrence_index).  No text searching is performed — operations are purely
-// positional.
-
-/// Return the 0-indexed line that contains `byte_pos` and that line's byte
-/// span within `content` as `(line_idx, line_start, line_end)` where
-/// `line_end` is the byte offset of the `\n` (or `content.len()` for the last
-/// line).
+/// Return `(line_idx, line_start_byte, line_end_byte)` for the line containing
+/// `byte_pos`.  `line_end` is the byte offset of the `\n` separator (or
+/// `content.len()` for the last line).
 fn locate_byte(content: &str, byte_pos: usize) -> Result<(usize, usize, usize), String> {
     if byte_pos > content.len() {
         return Err(format!(
@@ -715,72 +359,98 @@ fn locate_byte(content: &str, byte_pos: usize) -> Result<(usize, usize, usize), 
     Ok((line_idx, line_start, line_end))
 }
 
-/// Write back a modified single line as an EDIT revision, returning the new
-/// raw file content.  `header` must already have the new revision appended.
-fn commit_line_edit(
-    raw: &str,
-    header: &EdupageHeader,
-    file_id: &str,
-    new_sha1: &str,
-    new_line: &str,
-) -> Result<String, String> {
-    let header_json = serde_json::to_string_pretty(header).expect("header serialization");
-    let raw_lines: Vec<&str> = raw.lines().collect();
-    let body_start = raw_lines
-        .iter()
-        .position(|l| parse_delimiter(l).is_some())
-        .ok_or("no delimiter in edupage")?;
-    let existing_body = raw_lines[body_start..].join("\n");
-
-    let mut new_file = header_json;
-    new_file.push('\n');
-    new_file.push_str(&existing_body);
-    new_file.push('\n');
-    new_file.push_str(&delimiter(file_id, new_sha1));
-    new_file.push('\n');
-    new_file.push_str(new_line);
-    Ok(new_file)
-}
-
-/// Insert `text` at byte position `byte_pos` in the reconstructed markdown.
-/// Records the change as a single-line EDIT revision.
-pub fn insert_at(raw: &str, byte_pos: usize, text: &str) -> Result<String, String> {
-    let (mut header, _) = parse_blocks(raw)?;
-    let content = reconstruct(raw)?;
-    let now = chrono::Utc::now().to_rfc3339();
-
-    let (line_idx, line_start, line_end) = locate_byte(&content, byte_pos)?;
-    let offset_in_line = byte_pos - line_start;
-    let line = &content[line_start..line_end];
-
-    if !line.is_char_boundary(offset_in_line) {
+/// Insert `text` at `byte_pos` in `content`.
+fn insert_at_byte(content: &str, byte_pos: usize, text: &str) -> Result<String, String> {
+    if byte_pos > content.len() {
+        return Err(format!(
+            "byte position {} exceeds content length {}",
+            byte_pos,
+            content.len()
+        ));
+    }
+    if !content.is_char_boundary(byte_pos) {
         return Err(format!(
             "byte position {} is not on a UTF-8 character boundary",
             byte_pos
         ));
     }
+    Ok(format!(
+        "{}{}{}",
+        &content[..byte_pos],
+        text,
+        &content[byte_pos..]
+    ))
+}
 
-    let new_line = format!("{}{}{}", &line[..offset_in_line], text, &line[offset_in_line..]);
-    let line_number = line_idx + 1;
-    let new_sha1 = sha1_hex(&new_line);
-    let file_id = header.id.clone();
+/// Replace the content of line `line_idx` (the bytes `line_start..line_end`)
+/// with `new_text`, preserving the `\n` separator after the line if any.
+fn replace_line_content(
+    content: &str,
+    line_start: usize,
+    line_end: usize,
+    new_text: &str,
+) -> String {
+    // content[line_end..] starts at the '\n' (or is empty for last line).
+    format!(
+        "{}{}{}",
+        &content[..line_start],
+        new_text,
+        &content[line_end..]
+    )
+}
 
-    header.revisions.push(RevisionMeta {
-        id: new_sha1.clone(),
-        ctime: now,
-        action_id: uuid::Uuid::new_v4().to_string(),
-        revision_type: RevisionType::Edit,
-        line_start: line_number,
-        line_end: Some(line_number),
-    });
+/// Replace line at `line_idx` (0-based) in a `lines().collect()` sense.
+fn replace_line_by_idx(lines: &mut [String], line_idx: usize, new_text: &str) {
+    if line_idx < lines.len() {
+        lines[line_idx] = new_text.to_string();
+    }
+}
 
-    commit_line_edit(raw, &header, &file_id, &new_sha1, &new_line)
+/// HTML-escape a string for safe embedding in HTML attributes / text.
+pub fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+/// Strip characters that would break markdown image alt text / link syntax.
+pub fn sanitize_alt(s: &str) -> String {
+    s.chars()
+        .filter(|c| !matches!(c, '[' | ']' | '(' | ')' | '\n' | '\r'))
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+/// Generate a random short rewrite span ID (8 hex chars).
+fn generate_rewrite_id() -> String {
+    // Take first 8 chars of a v4 UUID (32 bits of randomness, sufficient for
+    // uniqueness within a single document).
+    let id = uuid::Uuid::new_v4().to_string();
+    id[..8].to_string()
+}
+
+// ── Public API ────────────────────────────────────────────────────────────────
+
+/// Create a new chapter file from raw markdown content.
+pub fn create(content: &str) -> String {
+    let fm = ChapterFrontmatter { next_note_id: 1, ..Default::default() };
+    write_raw(&fm, content, &[])
+}
+
+/// Parse a chapter file and return its content and notes.
+/// Footnote definitions are stripped from the returned content.
+pub fn read(raw: &str) -> Result<EduPage, String> {
+    let (fm, body) = parse_raw(raw)?;
+    let (content, defs) = extract_footnote_defs(&body);
+    let notes = rebuild_notes_with_bodies(&fm.notes, &defs);
+    Ok(EduPage { content, notes })
 }
 
 /// Append a note using an exact byte position.
 ///
-/// `word` is the plain-text selection (used for margin display).
-/// `src_end` is the byte offset in the reconstructed markdown after which the
+/// `src_end` is the byte offset in the chapter content after which the
 /// note anchor `[^<marker><id>]` is inserted.
 pub fn add_note_at(
     raw: &str,
@@ -789,87 +459,70 @@ pub fn add_note_at(
     src_end: usize,
     note_body: &str,
 ) -> Result<(String, NoteMeta), String> {
-    let (mut header, _) = parse_blocks(raw)?;
-    let next_id = header
+    let (mut fm, body) = parse_raw(raw)?;
+    let (mut content, defs) = extract_footnote_defs(&body);
+
+    let next_id = fm
         .next_note_id
-        .max(header.notes.iter().map(|n| n.id).max().unwrap_or(0) + 1);
-    header.next_note_id = next_id + 1;
+        .max(fm.notes.iter().map(|n| n.id).max().unwrap_or(0) + 1);
+    fm.next_note_id = next_id + 1;
     let now = chrono::Utc::now().to_rfc3339();
 
-    let content = reconstruct(raw)?;
     let anchor = anchor_text(&note_type, next_id);
-
-    let (line_idx, line_start, line_end) = locate_byte(&content, src_end)?;
-    let offset_in_line = src_end - line_start;
-    let line = &content[line_start..line_end];
-
-    if !line.is_char_boundary(offset_in_line) {
-        return Err(format!(
-            "byte position {} is not on a UTF-8 character boundary",
-            src_end
-        ));
-    }
-
-    let new_line = format!("{}{}{}", &line[..offset_in_line], anchor, &line[offset_in_line..]);
-    let line_number = line_idx + 1;
-    let new_sha1 = sha1_hex(&new_line);
-    let file_id = header.id.clone();
-
-    header.revisions.push(RevisionMeta {
-        id: new_sha1.clone(),
-        ctime: now.clone(),
-        action_id: uuid::Uuid::new_v4().to_string(),
-        revision_type: RevisionType::Edit,
-        line_start: line_number,
-        line_end: Some(line_number),
-    });
+    content = insert_at_byte(&content, src_end, &anchor)?;
 
     let new_note = NoteMeta {
         id: next_id,
-        note_type,
+        note_type: note_type.clone(),
         word: word.to_string(),
         ctime: now,
     };
-    header.notes.push(new_note.clone());
+    fm.notes.push(new_note.clone());
 
-    let header_json = serde_json::to_string_pretty(&header).expect("header serialization");
-    let raw_lines: Vec<&str> = raw.lines().collect();
-    let body_start = raw_lines
-        .iter()
-        .position(|l| parse_delimiter(l).is_some())
-        .ok_or("no delimiter in edupage")?;
-    let existing_body = raw_lines[body_start..].join("\n");
+    let mut notes_with_body = rebuild_notes_with_bodies(&fm.notes, &defs);
+    // Set the body for the new note.
+    if let Some(nwb) = notes_with_body.iter_mut().find(|n| n.id == next_id) {
+        nwb.body = note_body.to_string();
+    }
 
-    let mut new_file = header_json;
-    new_file.push('\n');
-    new_file.push_str(&existing_body);
-    new_file.push('\n');
-    new_file.push_str(&delimiter(&file_id, &new_sha1));
-    new_file.push('\n');
-    new_file.push_str(&new_line);
-    new_file.push('\n');
-    new_file.push_str(&note_delimiter(&file_id, next_id));
-    new_file.push('\n');
-    new_file.push_str(note_body);
-
-    Ok((new_file, new_note))
+    Ok((write_raw(&fm, &content, &notes_with_body), new_note))
 }
 
-/// Rewrite the passage `src_start..src_end` (single-line) to `replacement`,
-/// wrapping it in a `<span data-rewrite-id="N">` and recording the change as
-/// an EDIT revision.  Returns the new file and the assigned rewrite id.
+/// Remove a note: drops metadata, removes its anchor from content, and removes
+/// its footnote definition.
+pub fn delete_note(raw: &str, note_id: u32) -> Result<String, String> {
+    let (mut fm, body) = parse_raw(raw)?;
+    let (mut content, defs) = extract_footnote_defs(&body);
+
+    let note_idx = fm
+        .notes
+        .iter()
+        .position(|n| n.id == note_id)
+        .ok_or_else(|| format!("note {} not found", note_id))?;
+    let note_type = fm.notes[note_idx].note_type.clone();
+    let anchor = anchor_text(&note_type, note_id);
+
+    if !content.contains(&anchor) {
+        return Err(format!("anchor for note {} not found in body", note_id));
+    }
+    content = content.replace(&anchor, "");
+    fm.notes.remove(note_idx);
+
+    let notes_with_body = rebuild_notes_with_bodies(&fm.notes, &defs);
+    Ok(write_raw(&fm, &content, &notes_with_body))
+}
+
+/// Rewrite the passage `src_start..src_end` (must be on a single line) to
+/// `replacement`, wrapping it in a `<span data-rewrite-id="…">`.
+/// Returns the new file content and the assigned rewrite ID.
 pub fn rewrite_passage_at(
     raw: &str,
     src_start: usize,
     src_end: usize,
     replacement: &str,
-) -> Result<(String, u32), String> {
-    let (mut header, _) = parse_blocks(raw)?;
-    let rewrite_id = header.next_rewrite_id;
-    header.next_rewrite_id = rewrite_id + 1;
-    let now = chrono::Utc::now().to_rfc3339();
-
-    let content = reconstruct(raw)?;
+) -> Result<(String, String), String> {
+    let (fm, body) = parse_raw(raw)?;
+    let (content, defs) = extract_footnote_defs(&body);
 
     if src_start > src_end || src_end > content.len() {
         return Err(format!(
@@ -895,10 +548,11 @@ pub fn rewrite_passage_at(
         return Err("byte positions are not on UTF-8 character boundaries".to_string());
     }
 
+    let rewrite_id = generate_rewrite_id();
     let span_text = format!(
         r#"<span data-rewrite-id="{}">{}</span>"#,
         rewrite_id,
-        html_escape(replacement),
+        html_escape(replacement)
     );
     let new_line = format!(
         "{}{}{}",
@@ -906,45 +560,75 @@ pub fn rewrite_passage_at(
         span_text,
         &line[end_in_line..]
     );
-    let line_number = start_line + 1;
-    let new_sha1 = sha1_hex(&new_line);
-    let file_id = header.id.clone();
+    let new_content = replace_line_content(&content, line_start, line_end, &new_line);
 
-    header.revisions.push(RevisionMeta {
-        id: new_sha1.clone(),
-        ctime: now,
-        action_id: uuid::Uuid::new_v4().to_string(),
-        revision_type: RevisionType::Edit,
-        line_start: line_number,
-        line_end: Some(line_number),
-    });
-
-    commit_line_edit(raw, &header, &file_id, &new_sha1, &new_line)
-        .map(|f| (f, rewrite_id))
+    let notes_with_body = rebuild_notes_with_bodies(&fm.notes, &defs);
+    Ok((write_raw(&fm, &new_content, &notes_with_body), rewrite_id))
 }
 
-/// Add an SVG artifact using exact byte positions.
+/// Replace an existing `<span data-rewrite-id="old_id">…</span>` with a new
+/// span carrying a fresh ID and `new_replacement` as its content.
+/// Returns `(new_raw, new_rewrite_id)`.
+pub fn rewrite_existing_span(
+    raw: &str,
+    rewrite_id: &str,
+    new_replacement: &str,
+) -> Result<(String, String), String> {
+    let (fm, body) = parse_raw(raw)?;
+    let (content, defs) = extract_footnote_defs(&body);
+
+    let open_marker = format!(r#"<span data-rewrite-id="{}">"#, rewrite_id);
+    let close_marker = "</span>";
+    let new_id = generate_rewrite_id();
+
+    let mut new_content = content.clone();
+    let mut found = false;
+
+    let lines_owned: Vec<String> = content.lines().map(|l| l.to_string()).collect();
+    for (idx, line) in lines_owned.iter().enumerate() {
+        if let Some(open_pos) = line.find(&open_marker) {
+            let inner_start = open_pos + open_marker.len();
+            if let Some(close_rel) = line[inner_start..].find(close_marker) {
+                let span_end = inner_start + close_rel + close_marker.len();
+                let new_span = format!(
+                    r#"<span data-rewrite-id="{}">{}</span>"#,
+                    new_id,
+                    html_escape(new_replacement)
+                );
+                let new_line = format!("{}{}{}", &line[..open_pos], new_span, &line[span_end..]);
+                let mut updated = lines_owned.clone();
+                replace_line_by_idx(&mut updated, idx, &new_line);
+                new_content = updated.join("\n");
+                found = true;
+                break;
+            }
+        }
+    }
+
+    if !found {
+        return Err(format!("rewrite span {} not found", rewrite_id));
+    }
+
+    let notes_with_body = rebuild_notes_with_bodies(&fm.notes, &defs);
+    Ok((write_raw(&fm, &new_content, &notes_with_body), new_id))
+}
+
+/// Insert an artifact reference `![alt](epar://sha1_id)` into the chapter.
 ///
-/// `src_start..src_end` identifies the selection in the reconstructed markdown.
-/// Wide images (aspect_ratio >= 1) go on their own paragraph after the source
-/// line; tall images are inserted inline at `src_end`.
-/// The selection text `src_start..src_end` is stored as the artifact's
-/// `source` field for later re-generation.
+/// `sha1_id` is the content-addressed artifact ID (e.g., `"abc123.svg"`).
+/// Wide images (`aspect_ratio >= 1.0`) become block paragraphs after the
+/// source line; tall images are inlined at `src_end`.
 pub fn add_artifact_at(
     raw: &str,
     src_start: usize,
     src_end: usize,
-    mime_type: &str,
+    sha1_id: &str,
     caption: &str,
     aspect_ratio: f32,
-    semantic_type: &str,
-) -> Result<(String, ArtifactMeta), String> {
-    let (mut header, _) = parse_blocks(raw)?;
-    let artifact_id = header.next_artifact_id;
-    header.next_artifact_id = artifact_id + 1;
-    let now = chrono::Utc::now().to_rfc3339();
-
-    let content = reconstruct(raw)?;
+    _semantic_type: &str,
+) -> Result<String, String> {
+    let (fm, body) = parse_raw(raw)?;
+    let (content, defs) = extract_footnote_defs(&body);
 
     if src_start > src_end || src_end > content.len() {
         return Err(format!(
@@ -955,953 +639,532 @@ pub fn add_artifact_at(
         ));
     }
 
-    // Extract the selection text from the source for the `source` field.
-    let selection_text = content[src_start..src_end].to_string();
-
     let alt = sanitize_alt(caption);
-    let image_md = format!("![{}](epar://{})", alt, artifact_id);
+    let image_md = format!("![{}](epar://{})", alt, sha1_id);
 
-    let (line_idx, new_block) = if aspect_ratio >= 1.0 {
+    let new_content = if aspect_ratio >= 1.0 {
         // Wide: block paragraph after the source line.
-        let (line_idx, line_start, line_end) = locate_byte(&content, src_start)?;
+        let (_, line_start, line_end) = locate_byte(&content, src_start)?;
         let line = &content[line_start..line_end];
-        (line_idx, format!("{}\n\n{}", line, image_md))
+        let new_block = format!("{}\n\n{}", line, image_md);
+        replace_line_content(&content, line_start, line_end, &new_block)
     } else {
         // Tall: inline at src_end.
-        let (line_idx, line_start, line_end) = locate_byte(&content, src_end)?;
-        let offset_in_line = src_end - line_start;
-        let line = &content[line_start..line_end];
-        if !line.is_char_boundary(offset_in_line) {
-            return Err(format!(
-                "byte position {} is not on a UTF-8 character boundary",
-                src_end
-            ));
+        insert_at_byte(&content, src_end, &format!(" {}", image_md))?
+    };
+
+    let notes_with_body = rebuild_notes_with_bodies(&fm.notes, &defs);
+    Ok(write_raw(&fm, &new_content, &notes_with_body))
+}
+
+/// Remove an artifact: strips the `![alt](epar://artifact_id)` from the body.
+/// Block images (on their own paragraph) collapse back; inline images are
+/// spliced out of their line.
+pub fn delete_artifact(raw: &str, artifact_id: &str) -> Result<String, String> {
+    let (fm, body) = parse_raw(raw)?;
+    let (content, defs) = extract_footnote_defs(&body);
+
+    let url = format!("(epar://{})", artifact_id);
+    let mut lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
+    let mut found = false;
+
+    for idx in 0..lines.len() {
+        let line = lines[idx].clone();
+        if let Some(url_pos) = line.find(&url) {
+            let bracket = line[..url_pos].rfind("![").ok_or("malformed image markdown")?;
+            let img_end = url_pos + url.len();
+            let mut img_start = bracket;
+            if img_start > 0 && line.as_bytes()[img_start - 1] == b' ' {
+                img_start -= 1;
+            }
+            let cleaned = format!("{}{}", &line[..img_start], &line[img_end..]);
+
+            if cleaned.trim().is_empty() {
+                // Block image: remove this line and the preceding blank line.
+                if idx >= 1 && lines[idx - 1].trim().is_empty() {
+                    lines.remove(idx); // remove image line first
+                    lines.remove(idx - 1); // then blank line
+                } else {
+                    lines.remove(idx);
+                }
+            } else {
+                lines[idx] = cleaned;
+            }
+            found = true;
+            break;
         }
-        let new_line = format!(
-            "{} {}{}",
-            &line[..offset_in_line],
-            image_md,
-            &line[offset_in_line..]
-        );
-        (line_idx, new_line)
-    };
+    }
 
-    let line_number = line_idx + 1;
-    let new_sha1 = sha1_hex(&new_block);
-    let file_id = header.id.clone();
+    if !found {
+        return Err(format!(
+            "image marker for artifact {} not found in body",
+            artifact_id
+        ));
+    }
 
-    header.revisions.push(RevisionMeta {
-        id: new_sha1.clone(),
-        ctime: now.clone(),
-        action_id: uuid::Uuid::new_v4().to_string(),
-        revision_type: RevisionType::Edit,
-        line_start: line_number,
-        line_end: Some(line_number),
-    });
-
-    let artifact = ArtifactMeta {
-        id: artifact_id,
-        mime_type: mime_type.to_string(),
-        semantic_type: semantic_type.to_string(),
-        ctime: now,
-        caption: if caption.trim().is_empty() {
-            None
-        } else {
-            Some(caption.trim().to_string())
-        },
-        aspect_ratio,
-        source: selection_text,
-    };
-    header.artifacts.push(artifact.clone());
-
-    let header_json = serde_json::to_string_pretty(&header).expect("header serialization");
-    let raw_lines: Vec<&str> = raw.lines().collect();
-    let body_start = raw_lines
-        .iter()
-        .position(|l| parse_delimiter(l).is_some())
-        .ok_or("no delimiter in edupage")?;
-    let existing_body = raw_lines[body_start..].join("\n");
-
-    let mut new_file = header_json;
-    new_file.push('\n');
-    new_file.push_str(&existing_body);
-    new_file.push('\n');
-    new_file.push_str(&delimiter(&file_id, &new_sha1));
-    new_file.push('\n');
-    new_file.push_str(&new_block);
-
-    Ok((new_file, artifact))
+    let new_content = lines.join("\n");
+    let notes_with_body = rebuild_notes_with_bodies(&fm.notes, &defs);
+    Ok(write_raw(&fm, &new_content, &notes_with_body))
 }
 
-/// Insert an appendix cross-reference marker `[^A<seq>]` at `src_end`.
-pub fn insert_appendix_ref_at(
+/// Update the artifact reference in the chapter when an artifact is regenerated.
+///
+/// Replaces `![alt](epar://old_id)` with `![new_alt](epar://new_id)` and
+/// repositions between block and inline if the aspect ratio crosses the 1.0
+/// boundary.
+pub fn regenerate_artifact(
     raw: &str,
-    appendix_seq: u32,
-    src_end: usize,
+    old_id: &str,
+    new_id: &str,
+    new_caption: &str,
+    new_aspect: f32,
 ) -> Result<String, String> {
-    let anchor = format!("[^A{}]", appendix_seq);
-    insert_at(raw, src_end, &anchor)
+    let (fm, body) = parse_raw(raw)?;
+    let (content, defs) = extract_footnote_defs(&body);
+
+    let old_url = format!("(epar://{})", old_id);
+    let new_alt = sanitize_alt(new_caption);
+    let new_image_md = format!("![{}](epar://{})", new_alt, new_id);
+
+    let mut lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
+    let mut found = false;
+
+    for idx in 0..lines.len() {
+        let line = lines[idx].clone();
+        if let Some(url_pos) = line.find(&old_url) {
+            let bracket = line[..url_pos].rfind("![").ok_or("malformed image markdown")?;
+            let img_end = url_pos + old_url.len();
+            let mut img_start = bracket;
+            if img_start > 0 && line.as_bytes()[img_start - 1] == b' ' {
+                img_start -= 1;
+            }
+            let cleaned = format!("{}{}", &line[..img_start], &line[img_end..]);
+            let old_is_block = cleaned.trim().is_empty();
+            let new_is_block = new_aspect >= 1.0;
+
+            if old_is_block && new_is_block {
+                // Block → Block: update the image reference.
+                lines[idx] = new_image_md.clone();
+            } else if old_is_block && !new_is_block {
+                // Block → Inline: merge with preceding paragraph.
+                if idx >= 1 && lines[idx - 1].trim().is_empty() && idx >= 2 {
+                    // Pattern: [para, blank, image_line] → [para image]
+                    let para = lines[idx - 2].clone();
+                    lines[idx - 2] = format!("{} {}", para, new_image_md);
+                    lines.remove(idx); // remove image line
+                    lines.remove(idx - 1); // remove blank line
+                } else {
+                    lines[idx] = new_image_md.clone();
+                }
+            } else if !old_is_block && new_is_block {
+                // Inline → Block: extract from line, add as new block paragraph.
+                lines[idx] = cleaned.trim_end().to_string();
+                lines.insert(idx + 1, String::new());
+                lines.insert(idx + 2, new_image_md.clone());
+            } else {
+                // Inline → Inline: update the image reference within the line.
+                lines[idx] = format!(
+                    "{}{}{}",
+                    &line[..img_start],
+                    new_image_md,
+                    &line[img_end..]
+                );
+            }
+            found = true;
+            break;
+        }
+    }
+
+    if !found {
+        return Err(format!(
+            "image marker for artifact {} not found in body",
+            old_id
+        ));
+    }
+
+    let new_content = lines.join("\n");
+    let notes_with_body = rebuild_notes_with_bodies(&fm.notes, &defs);
+    Ok(write_raw(&fm, &new_content, &notes_with_body))
 }
+
+/// Insert appendix cross-reference marker `[^A<seq>]` at `src_end`.
+pub fn insert_appendix_ref_at(raw: &str, appendix_seq: u32, src_end: usize) -> Result<String, String> {
+    let (fm, body) = parse_raw(raw)?;
+    let (content, defs) = extract_footnote_defs(&body);
+
+    let anchor = format!("[^A{}]", appendix_seq);
+    let new_content = insert_at_byte(&content, src_end, &anchor)?;
+
+    let notes_with_body = rebuild_notes_with_bodies(&fm.notes, &defs);
+    Ok(write_raw(&fm, &new_content, &notes_with_body))
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // ── Test-only setup helpers ───────────────────────────────────────────────
-    // These are the occurrence-based versions of the production functions that
-    // were replaced by exact-byte-position `_at` variants.  They live here
-    // because several tests for live functions (delete_artifact,
-    // regenerate_artifact, delete_note, rewrite_existing_span) use them as
-    // convenient setup helpers.
+    const SAMPLE: &str =
+        "# Chapter One\n\nHello world.\n\nSecond paragraph with blackhole here.";
 
-    fn is_word_char(c: char) -> bool {
-        c.is_alphanumeric() || c == '\'' || c == '-'
-    }
-
-    fn strip_inline_markdown(line: &str) -> (String, Vec<usize>) {
-        let mut stripped = String::new();
-        let mut byte_map: Vec<usize> = Vec::with_capacity(line.len() + 1);
-        let mut src_byte = 0usize;
-        for ch in line.chars() {
-            let ch_len = ch.len_utf8();
-            if matches!(ch, '*' | '_' | '`' | '~') {
-                src_byte += ch_len;
-                continue;
+    /// Find the byte position of the end of the nth occurrence of `target` in `s`.
+    fn byte_end_of(s: &str, target: &str, occurrence: usize) -> usize {
+        let mut count = 0;
+        let mut start = 0;
+        while let Some(pos) = s[start..].find(target) {
+            count += 1;
+            let end = start + pos + target.len();
+            if count == occurrence {
+                return end;
             }
-            for k in 0..ch_len {
-                byte_map.push(src_byte + k);
-            }
-            stripped.push(ch);
-            src_byte += ch_len;
+            start += pos + 1;
         }
-        byte_map.push(src_byte);
-        (stripped, byte_map)
+        panic!("target '{}' occurrence {} not found", target, occurrence);
     }
 
-    fn insert_anchor(
-        content: &str,
-        query: &str,
-        target_n: u32,
-        anchor: &str,
-    ) -> Result<(usize, String), String> {
-        if target_n == 0 {
-            return Err("occurrence index must be 1 or greater".to_string());
-        }
-        let mut count: u32 = 0;
-        for (line_idx, line) in content.lines().enumerate() {
-            let (stripped, byte_map) = strip_inline_markdown(line);
-            let mut search_start = 0;
-            while let Some(rel_pos) = stripped[search_start..].find(query) {
-                let pos = search_start + rel_pos;
-                let end = pos + query.len();
-                let before_is_word = pos > 0
-                    && stripped[..pos].chars().last().map(is_word_char).unwrap_or(false);
-                let after_is_word = end < stripped.len()
-                    && stripped[end..].chars().next().map(is_word_char).unwrap_or(false);
-                if !before_is_word && !after_is_word {
-                    count += 1;
-                    if count == target_n {
-                        let src_end = byte_map[end];
-                        let new_line = format!("{}{}{}", &line[..src_end], anchor, &line[src_end..]);
-                        return Ok((line_idx, new_line));
-                    }
-                }
-                search_start = pos + 1;
-            }
-        }
-        Err(format!("could not find occurrence {} of '{}'", target_n, query))
-    }
-
-    fn add_note(
-        raw: &str,
-        note_type: NoteType,
-        word: &str,
-        occurrence_index: u32,
-        note_body: &str,
-    ) -> Result<(String, NoteMeta), String> {
-        let (mut header, _blocks) = parse_blocks(raw)?;
-        let next_id = header
-            .next_note_id
-            .max(header.notes.iter().map(|n| n.id).max().unwrap_or(0) + 1);
-        header.next_note_id = next_id + 1;
-        let now = chrono::Utc::now().to_rfc3339();
-        let content = reconstruct(raw)?;
-        let anchor = anchor_text(&note_type, next_id);
-        let (line_idx, new_line) = insert_anchor(&content, word, occurrence_index, &anchor)?;
-        let line_number = line_idx + 1;
-        let new_sha1 = sha1_hex(&new_line);
-        let file_id = header.id.clone();
-        let new_note = NoteMeta { id: next_id, note_type, word: word.to_string(), ctime: now.clone() };
-        header.revisions.push(RevisionMeta {
-            id: new_sha1.clone(),
-            ctime: now,
-            action_id: uuid::Uuid::new_v4().to_string(),
-            revision_type: RevisionType::Edit,
-            line_start: line_number,
-            line_end: Some(line_number),
-        });
-        header.notes.push(new_note.clone());
-        let header_json = serde_json::to_string_pretty(&header).expect("header serialization");
-        let lines: Vec<&str> = raw.lines().collect();
-        let body_start = lines.iter().position(|l| parse_delimiter(l).is_some()).ok_or("no delimiter")?;
-        let existing_body = lines[body_start..].join("\n");
-        let mut new_file = header_json;
-        new_file.push('\n');
-        new_file.push_str(&existing_body);
-        new_file.push('\n');
-        new_file.push_str(&delimiter(&file_id, &new_sha1));
-        new_file.push('\n');
-        new_file.push_str(&new_line);
-        new_file.push('\n');
-        new_file.push_str(&note_delimiter(&file_id, next_id));
-        new_file.push('\n');
-        new_file.push_str(note_body);
-        Ok((new_file, new_note))
-    }
-
-    fn replace_in_line(
-        content: &str,
-        selection: &str,
-        target_n: u32,
-        replacement: &str,
-    ) -> Result<(usize, String), String> {
-        if selection.contains('\n') {
-            return Err("multi-line selections aren't supported".to_string());
-        }
-        if target_n == 0 {
-            return Err("occurrence index must be 1 or greater".to_string());
-        }
-        let mut count: u32 = 0;
-        for (line_idx, line) in content.lines().enumerate() {
-            let (stripped, byte_map) = strip_inline_markdown(line);
-            let mut search_start = 0;
-            while let Some(rel_pos) = stripped[search_start..].find(selection) {
-                let pos = search_start + rel_pos;
-                let end = pos + selection.len();
-                let before_is_word = pos > 0
-                    && stripped[..pos].chars().last().map(is_word_char).unwrap_or(false);
-                let after_is_word = end < stripped.len()
-                    && stripped[end..].chars().next().map(is_word_char).unwrap_or(false);
-                if !before_is_word && !after_is_word {
-                    count += 1;
-                    if count == target_n {
-                        let src_pos = byte_map[pos];
-                        let src_end = byte_map[end];
-                        return Ok((line_idx, format!("{}{}{}", &line[..src_pos], replacement, &line[src_end..])));
-                    }
-                }
-                search_start = pos + 1;
-            }
-        }
-        Err(format!("could not find occurrence {} of '{}'", target_n, selection))
-    }
-
-    fn rewrite_passage(
-        raw: &str,
-        selection: &str,
-        occurrence_index: u32,
-        replacement: &str,
-    ) -> Result<(String, u32), String> {
-        let (mut header, _) = parse_blocks(raw)?;
-        let rewrite_id = header.next_rewrite_id;
-        header.next_rewrite_id = rewrite_id + 1;
-        let now = chrono::Utc::now().to_rfc3339();
-        let content = reconstruct(raw)?;
-        let span_text = format!(r#"<span data-rewrite-id="{}">{}</span>"#, rewrite_id, html_escape(replacement));
-        let (line_idx, new_line) = replace_in_line(&content, selection, occurrence_index, &span_text)?;
-        let line_number = line_idx + 1;
-        let new_sha1 = sha1_hex(&new_line);
-        let file_id = header.id.clone();
-        header.revisions.push(RevisionMeta {
-            id: new_sha1.clone(),
-            ctime: now,
-            action_id: uuid::Uuid::new_v4().to_string(),
-            revision_type: RevisionType::Edit,
-            line_start: line_number,
-            line_end: Some(line_number),
-        });
-        let header_json = serde_json::to_string_pretty(&header).expect("header serialization");
-        let lines: Vec<&str> = raw.lines().collect();
-        let body_start = lines.iter().position(|l| parse_delimiter(l).is_some()).ok_or("no delimiter")?;
-        let existing_body = lines[body_start..].join("\n");
-        let mut new_file = header_json;
-        new_file.push('\n');
-        new_file.push_str(&existing_body);
-        new_file.push('\n');
-        new_file.push_str(&delimiter(&file_id, &new_sha1));
-        new_file.push('\n');
-        new_file.push_str(&new_line);
-        Ok((new_file, rewrite_id))
-    }
-
-    fn line_of_occurrence(content: &str, query: &str, target_n: u32) -> Result<usize, String> {
-        let mut count: u32 = 0;
-        for (line_idx, line) in content.lines().enumerate() {
-            let (stripped, _byte_map) = strip_inline_markdown(line);
-            let mut search_start = 0;
-            while let Some(rel_pos) = stripped[search_start..].find(query) {
-                let pos = search_start + rel_pos;
-                let end = pos + query.len();
-                let before_is_word = pos > 0
-                    && stripped[..pos].chars().last().map(is_word_char).unwrap_or(false);
-                let after_is_word = end < stripped.len()
-                    && stripped[end..].chars().next().map(is_word_char).unwrap_or(false);
-                if !before_is_word && !after_is_word {
-                    count += 1;
-                    if count == target_n {
-                        return Ok(line_idx);
-                    }
-                }
-                search_start = pos + 1;
-            }
-        }
-        Err(format!("could not find occurrence {} of '{}'", target_n, query))
-    }
-
-    fn sanitize_alt_local(s: &str) -> String {
-        s.chars()
-            .filter(|c| !matches!(c, '[' | ']' | '(' | ')' | '\n' | '\r'))
-            .collect::<String>()
-            .trim()
-            .to_string()
-    }
-
-    fn add_artifact(
-        raw: &str,
-        selection: &str,
-        occurrence_index: u32,
-        caption: &str,
-        aspect_ratio: f32,
-        semantic_type: &str,
-    ) -> Result<(String, ArtifactMeta), String> {
-        let (mut header, _) = parse_blocks(raw)?;
-        let artifact_id = header.next_artifact_id;
-        header.next_artifact_id = artifact_id + 1;
-        let now = chrono::Utc::now().to_rfc3339();
-        let content = reconstruct(raw)?;
-        let alt = sanitize_alt_local(caption);
-        let image_md = format!("![{}](epar://{})", alt, artifact_id);
-        let (line_idx, new_block) = if aspect_ratio >= 1.0 {
-            let idx = line_of_occurrence(&content, selection, occurrence_index)?;
-            let line = content.lines().nth(idx).unwrap_or("");
-            (idx, format!("{}\n\n{}", line, image_md))
-        } else {
-            insert_anchor(&content, selection, occurrence_index, &format!(" {}", image_md))?
-        };
-        let line_number = line_idx + 1;
-        let new_sha1 = sha1_hex(&new_block);
-        let file_id = header.id.clone();
-        let artifact = ArtifactMeta {
-            id: artifact_id,
-            mime_type: "image/svg+xml".to_string(),
-            semantic_type: semantic_type.to_string(),
-            ctime: now.clone(),
-            caption: if caption.trim().is_empty() { None } else { Some(caption.trim().to_string()) },
-            aspect_ratio,
-            source: selection.to_string(),
-        };
-        header.revisions.push(RevisionMeta {
-            id: new_sha1.clone(),
-            ctime: now,
-            action_id: uuid::Uuid::new_v4().to_string(),
-            revision_type: RevisionType::Edit,
-            line_start: line_number,
-            line_end: Some(line_number),
-        });
-        header.artifacts.push(artifact.clone());
-        let header_json = serde_json::to_string_pretty(&header).expect("header serialization");
-        let lines: Vec<&str> = raw.lines().collect();
-        let body_start = lines.iter().position(|l| parse_delimiter(l).is_some()).ok_or("no delimiter")?;
-        let existing_body = lines[body_start..].join("\n");
-        let mut new_file = header_json;
-        new_file.push('\n');
-        new_file.push_str(&existing_body);
-        new_file.push('\n');
-        new_file.push_str(&delimiter(&file_id, &new_sha1));
-        new_file.push('\n');
-        new_file.push_str(&new_block);
-        Ok((new_file, artifact))
-    }
-
-    fn insert_appendix_ref(
-        raw: &str,
-        appendix_seq: u32,
-        selection: &str,
-        occurrence_index: u32,
-    ) -> Result<String, String> {
-        let (mut header, _) = parse_blocks(raw)?;
-        let now = chrono::Utc::now().to_rfc3339();
-        let content = reconstruct(raw)?;
-        let anchor = format!("[^A{}]", appendix_seq);
-        let (line_idx, new_line) = insert_anchor(&content, selection, occurrence_index, &anchor)?;
-        let line_number = line_idx + 1;
-        let new_sha1 = sha1_hex(&new_line);
-        let file_id = header.id.clone();
-        header.revisions.push(RevisionMeta {
-            id: new_sha1.clone(),
-            ctime: now,
-            action_id: uuid::Uuid::new_v4().to_string(),
-            revision_type: RevisionType::Edit,
-            line_start: line_number,
-            line_end: Some(line_number),
-        });
-        let header_json = serde_json::to_string_pretty(&header).expect("header serialization");
-        let lines: Vec<&str> = raw.lines().collect();
-        let body_start = lines.iter().position(|l| parse_delimiter(l).is_some()).ok_or("no delimiter")?;
-        let existing_body = lines[body_start..].join("\n");
-        let mut new_file = header_json;
-        new_file.push('\n');
-        new_file.push_str(&existing_body);
-        new_file.push('\n');
-        new_file.push_str(&delimiter(&file_id, &new_sha1));
-        new_file.push('\n');
-        new_file.push_str(&new_line);
-        Ok(new_file)
-    }
-
-    // ── Tests ─────────────────────────────────────────────────────────────────
-
-    const SAMPLE_MD: &str = "# Chapter One\n\nHello world.\n\nSecond paragraph with blackhole here. Another blackhole follows.";
+    // ── create / read ─────────────────────────────────────────────────────────
 
     #[test]
-    fn create_produces_parseable_header() {
-        let id = "test-uuid-1234";
-        let raw = create(id, "Chapter One", Some("A test chapter."), SAMPLE_MD);
-        assert!(raw.starts_with('{'));
-        assert!(raw.contains(&format!("\"id\": \"{}\"", id)));
-        assert!(raw.contains("======!"));
+    fn create_produces_parseable_frontmatter() {
+        let raw = create(SAMPLE);
+        assert!(raw.starts_with("---\n"));
+        let (fm, body) = parse_raw(&raw).unwrap();
+        assert_eq!(fm.next_note_id, 1);
+        assert!(fm.notes.is_empty());
+        assert!(body.contains("# Chapter One"));
     }
 
     #[test]
-    fn reconstruct_recovers_original_content() {
-        let raw = create("test-id", "Chapter One", None, SAMPLE_MD);
-        let result = reconstruct(&raw).unwrap();
-        assert_eq!(result, SAMPLE_MD);
-    }
-
-    #[test]
-    fn reconstruct_errors_on_missing_delimiter() {
-        assert!(reconstruct("just some json without a delimiter").is_err());
-    }
-
-    #[test]
-    fn sha1_is_stable() {
-        assert_eq!(sha1_hex("hello"), sha1_hex("hello"));
-        assert_ne!(sha1_hex("hello"), sha1_hex("world"));
-    }
-
-    #[test]
-    fn read_returns_empty_notes_for_fresh_page() {
-        let raw = create("ch-01", "Chapter One", None, SAMPLE_MD);
+    fn read_returns_content_and_empty_notes() {
+        let raw = create(SAMPLE);
         let page = read(&raw).unwrap();
-        assert_eq!(page.content, SAMPLE_MD);
+        assert_eq!(page.content, SAMPLE);
         assert!(page.notes.is_empty());
     }
 
     #[test]
-    fn add_note_assigns_id_1_on_first_note() {
-        let raw = create("ch-01", "Chapter", None, "The blackhole is here.");
-        let (_, note) = add_note(&raw, NoteType::Definition, "blackhole", 1, "A region of spacetime.").unwrap();
+    fn read_errors_on_missing_frontmatter() {
+        assert!(read("just plain text without frontmatter").is_err());
+    }
+
+    // ── add_note_at ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn add_note_at_inserts_anchor() {
+        let content = "The blackhole is here.";
+        let raw = create(content);
+        let src_end = byte_end_of(content, "blackhole", 1);
+        let (new_raw, note) =
+            add_note_at(&raw, NoteType::Definition, "blackhole", src_end, "A spacetime region.").unwrap();
+        let page = read(&new_raw).unwrap();
         assert_eq!(note.id, 1);
         assert_eq!(note.word, "blackhole");
+        assert_eq!(page.content, "The blackhole[^*1] is here.");
+        assert_eq!(page.notes[0].body, "A spacetime region.");
     }
 
     #[test]
-    fn add_note_inserts_anchor_after_target_word() {
-        let raw = create("ch-01", "Chapter", None, "The blackhole is here.");
-        let (new_raw, _) =
-            add_note(&raw, NoteType::Definition, "blackhole", 1, "Definition body").unwrap();
-        let content = reconstruct(&new_raw).unwrap();
-        assert_eq!(content, "The blackhole[^*1] is here.");
-    }
-
-    #[test]
-    fn add_note_respects_occurrence_index() {
-        let raw = create("ch-01", "Chapter", None, "First blackhole. Second blackhole here.");
-        let (new_raw, _) =
-            add_note(&raw, NoteType::Definition, "blackhole", 2, "Body").unwrap();
-        let content = reconstruct(&new_raw).unwrap();
-        assert_eq!(content, "First blackhole. Second blackhole[^*1] here.");
-    }
-
-    #[test]
-    fn add_note_increments_ids_across_calls() {
-        let raw = create("ch-01", "Chapter", None, "First blackhole. Second blackhole here.");
-        let (raw, n1) =
-            add_note(&raw, NoteType::Definition, "blackhole", 1, "A").unwrap();
-        let (raw, n2) =
-            add_note(&raw, NoteType::Definition, "blackhole", 2, "B").unwrap();
+    fn add_note_at_increments_id() {
+        let content = "First blackhole. Second blackhole.";
+        let raw = create(content);
+        let e1 = byte_end_of(content, "blackhole", 1);
+        let (raw, n1) = add_note_at(&raw, NoteType::Definition, "blackhole", e1, "A").unwrap();
+        // After the first note the content changed; find the second occurrence in the new content.
+        let new_content = read(&raw).unwrap().content;
+        let e2 = byte_end_of(&new_content, "blackhole", 2);
+        let (_, n2) = add_note_at(&raw, NoteType::Definition, "blackhole", e2, "B").unwrap();
         assert_eq!(n1.id, 1);
         assert_eq!(n2.id, 2);
-        let content = reconstruct(&raw).unwrap();
-        assert_eq!(content, "First blackhole[^*1]. Second blackhole[^*2] here.");
     }
 
     #[test]
-    fn add_note_persists_body_in_note_block() {
-        let raw = create("ch-01", "Chapter", None, "The blackhole is here.");
+    fn add_note_at_footnote_uses_dagger() {
+        let content = "The gravitational collapse is fast.";
+        let raw = create(content);
+        let e = byte_end_of(content, "gravitational collapse", 1);
         let (new_raw, _) =
-            add_note(&raw, NoteType::Definition, "blackhole", 1, "Definition body text").unwrap();
-        assert!(new_raw.contains("======! ch-01|NOTE:1 !======"));
-        assert!(new_raw.contains("Definition body text"));
+            add_note_at(&raw, NoteType::Footnote, "gravitational collapse", e, "Body.").unwrap();
+        let page = read(&new_raw).unwrap();
+        assert!(page.content.contains("[^†1]"));
     }
 
     #[test]
-    fn add_note_returns_error_for_missing_word() {
-        let raw = create("ch-01", "Chapter", None, "Just some text.");
-        let result = add_note(&raw, NoteType::Definition, "blackhole", 1, "Body");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn add_note_returns_error_for_out_of_range_occurrence() {
-        let raw = create("ch-01", "Chapter", None, "One blackhole only.");
-        let result = add_note(&raw, NoteType::Definition, "blackhole", 2, "Body");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn add_note_finds_target_across_bold_markers() {
-        // Source has `**important** fact`; the user's rendered selection
-        // is the plain "important fact". The anchor should land right after
-        // the closing `**`.
-        let raw = create("ch-01", "Chapter", None, "An **important** fact about science.");
-        let (new_raw, _) =
-            add_note(&raw, NoteType::Definition, "important fact", 1, "Body").unwrap();
-        let content = reconstruct(&new_raw).unwrap();
-        assert_eq!(
-            content,
-            "An **important** fact[^*1] about science."
-        );
-    }
-
-    #[test]
-    fn add_note_finds_target_inside_italic_markers() {
-        let raw = create("ch-01", "Chapter", None, "The _energy_ flows through cells.");
-        let (new_raw, _) =
-            add_note(&raw, NoteType::Definition, "energy", 1, "Body").unwrap();
-        let content = reconstruct(&new_raw).unwrap();
-        assert_eq!(content, "The _energy_[^*1] flows through cells.");
-    }
-
-    #[test]
-    fn add_note_finds_target_with_inline_code() {
-        let raw = create("ch-01", "Chapter", None, "Call `printf` to print.");
-        let (new_raw, _) =
-            add_note(&raw, NoteType::Definition, "printf", 1, "Body").unwrap();
-        let content = reconstruct(&new_raw).unwrap();
-        assert_eq!(content, "Call `printf`[^*1] to print.");
-    }
-
-    #[test]
-    fn add_note_respects_word_boundaries() {
-        // "ole" matches inside "blackhole" but with surrounding word chars — should be skipped.
-        let raw = create("ch-01", "Chapter", None, "The blackhole has ole here.");
-        let (new_raw, _) = add_note(&raw, NoteType::Definition, "ole", 1, "Body").unwrap();
-        let content = reconstruct(&new_raw).unwrap();
-        assert_eq!(content, "The blackhole has ole[^*1] here.");
-    }
-
-    #[test]
-    fn delete_note_removes_anchor_meta_and_block() {
-        let raw = create("ch-01", "Chapter", None, "The blackhole is here.");
-        let (raw, _) =
-            add_note(&raw, NoteType::Definition, "blackhole", 1, "Definition body").unwrap();
+    fn add_note_does_not_reuse_id_after_delete() {
+        let content = "A blackhole and another blackhole.";
+        let raw = create(content);
+        let e1 = byte_end_of(content, "blackhole", 1);
+        let (raw, _) = add_note_at(&raw, NoteType::Definition, "blackhole", e1, "A").unwrap();
         let raw = delete_note(&raw, 1).unwrap();
+        let new_content = read(&raw).unwrap().content;
+        let e2 = byte_end_of(&new_content, "blackhole", 1);
+        let (_, note) = add_note_at(&raw, NoteType::Definition, "blackhole", e2, "B").unwrap();
+        assert_eq!(note.id, 2, "id 1 must not be reused after deletion");
+    }
 
-        let content = reconstruct(&raw).unwrap();
-        assert_eq!(content, "The blackhole is here.");
+    // ── delete_note ───────────────────────────────────────────────────────────
 
+    #[test]
+    fn delete_note_removes_anchor_and_body() {
+        let content = "The blackhole is here.";
+        let raw = create(content);
+        let e = byte_end_of(content, "blackhole", 1);
+        let (raw, _) = add_note_at(&raw, NoteType::Definition, "blackhole", e, "A region.").unwrap();
+        let raw = delete_note(&raw, 1).unwrap();
         let page = read(&raw).unwrap();
+        assert_eq!(page.content, content);
         assert!(page.notes.is_empty());
-
-        assert!(!raw.contains("======! ch-01|NOTE:1 !======"));
-        assert!(!raw.contains("Definition body"));
     }
 
     #[test]
     fn delete_note_preserves_other_notes() {
-        let raw = create("ch-01", "Chapter", None, "First blackhole. Second blackhole here.");
-        let (raw, _) = add_note(&raw, NoteType::Definition, "blackhole", 1, "First def").unwrap();
-        let (raw, _) = add_note(&raw, NoteType::Definition, "blackhole", 2, "Second def").unwrap();
+        let content = "First blackhole. Second blackhole.";
+        let raw = create(content);
+        let e1 = byte_end_of(content, "blackhole", 1);
+        let (raw, _) = add_note_at(&raw, NoteType::Definition, "blackhole", e1, "First").unwrap();
+        let c2 = read(&raw).unwrap().content;
+        let e2 = byte_end_of(&c2, "blackhole", 2);
+        let (raw, _) = add_note_at(&raw, NoteType::Definition, "blackhole", e2, "Second").unwrap();
         let raw = delete_note(&raw, 1).unwrap();
-
         let page = read(&raw).unwrap();
         assert_eq!(page.notes.len(), 1);
         assert_eq!(page.notes[0].id, 2);
-        assert_eq!(page.notes[0].body, "Second def");
-        assert_eq!(page.content, "First blackhole. Second blackhole[^*2] here.");
+        assert_eq!(page.notes[0].body, "Second");
     }
 
     #[test]
-    fn delete_note_does_not_reuse_id() {
-        let raw = create("ch-01", "Chapter", None, "A blackhole and a blackhole.");
-        let (raw, _) = add_note(&raw, NoteType::Definition, "blackhole", 1, "A").unwrap();
-        let raw = delete_note(&raw, 1).unwrap();
-        let (_, note) = add_note(&raw, NoteType::Definition, "blackhole", 1, "B").unwrap();
-        assert_eq!(note.id, 2, "deleted id 1 should not be reused");
+    fn delete_note_errors_for_unknown_id() {
+        let raw = create("Nothing here.");
+        assert!(delete_note(&raw, 99).is_err());
     }
 
-    #[test]
-    fn add_note_footnote_uses_dagger_marker() {
-        let raw = create("ch-01", "Chapter", None, "The gravitational collapse is fast.");
-        let (new_raw, note) = add_note(
-            &raw,
-            NoteType::Footnote,
-            "gravitational collapse",
-            1,
-            "A few sentences about collapse.",
-        )
-        .unwrap();
-        assert_eq!(note.note_type, NoteType::Footnote);
-        let content = reconstruct(&new_raw).unwrap();
-        assert_eq!(content, "The gravitational collapse[^†1] is fast.");
-    }
+    // ── rewrite_passage_at ────────────────────────────────────────────────────
 
     #[test]
-    fn add_note_supports_mixed_types_with_distinct_markers() {
-        let raw = create("ch-01", "Chapter", None, "The blackhole is here.");
-        let (raw, _) = add_note(&raw, NoteType::Definition, "blackhole", 1, "Def body").unwrap();
-        let (raw, _) = add_note(&raw, NoteType::Footnote, "blackhole", 1, "Footnote body").unwrap();
-        let content = reconstruct(&raw).unwrap();
-        // The definition's anchor is part of the word now; the footnote
-        // search must still find "blackhole" at occurrence 1 in the edited
-        // body and add its anchor right after.
-        assert!(content.contains("[^*1]"));
-        assert!(content.contains("[^†2]"));
-    }
-
-    #[test]
-    fn rewrite_passage_wraps_replacement_in_span() {
-        let raw = create("ch-01", "Chapter", None, "The collapse is dramatic.");
-        let (new_raw, id) =
-            rewrite_passage(&raw, "collapse is dramatic", 1, "fall is sudden and total").unwrap();
-        assert_eq!(id, 1);
-        let content = reconstruct(&new_raw).unwrap();
-        assert_eq!(
-            content,
-            r#"The <span data-rewrite-id="1">fall is sudden and total</span>."#
-        );
-    }
-
-    #[test]
-    fn rewrite_passage_increments_id_across_calls() {
-        let raw = create("ch-01", "Chapter", None, "First passage here. Second passage here.");
-        let (raw, id1) = rewrite_passage(&raw, "First passage", 1, "Initial bit").unwrap();
-        let (_, id2) = rewrite_passage(&raw, "Second passage", 1, "Following bit").unwrap();
-        assert_eq!(id1, 1);
-        assert_eq!(id2, 2);
+    fn rewrite_passage_wraps_in_span() {
+        let content = "The collapse is dramatic.";
+        let raw = create(content);
+        let start = byte_end_of(content, "The ", 1);
+        let end = byte_end_of(content, "collapse is dramatic", 1);
+        let (new_raw, rid) = rewrite_passage_at(&raw, start, end, "fall is sudden").unwrap();
+        assert_eq!(rid.len(), 8, "rewrite id should be 8 hex chars");
+        let page = read(&new_raw).unwrap();
+        assert!(page.content.contains(&format!(r#"data-rewrite-id="{}""#, rid)));
+        assert!(page.content.contains("fall is sudden"));
     }
 
     #[test]
     fn rewrite_passage_html_escapes_replacement() {
-        let raw = create("ch-01", "Chapter", None, "See the demo here.");
-        let (new_raw, _) =
-            rewrite_passage(&raw, "demo", 1, "X < Y & Z > W").unwrap();
-        let content = reconstruct(&new_raw).unwrap();
-        assert!(content.contains("X &lt; Y &amp; Z &gt; W"));
-        assert!(!content.contains("X < Y"));
+        let content = "See the demo here.";
+        let raw = create(content);
+        let start = byte_end_of(content, "See ", 1);
+        let end = byte_end_of(content, "demo", 1);
+        let (new_raw, _) = rewrite_passage_at(&raw, start, end, "X < Y & Z").unwrap();
+        let page = read(&new_raw).unwrap();
+        assert!(page.content.contains("X &lt; Y &amp; Z"));
+        assert!(!page.content.contains("X < Y"));
     }
 
     #[test]
-    fn rewrite_passage_rejects_multi_line_selection() {
-        let raw = create("ch-01", "Chapter", None, "A line.\nAnother line.");
-        let result = rewrite_passage(&raw, "A line.\nAnother", 1, "X");
+    fn rewrite_passage_rejects_multi_line() {
+        let content = "Line one.\nLine two.";
+        let raw = create(content);
+        let result = rewrite_passage_at(&raw, 0, content.len(), "X");
         assert!(result.is_err());
     }
 
-    #[test]
-    fn rewrite_passage_errors_when_selection_not_found() {
-        let raw = create("ch-01", "Chapter", None, "Just some text.");
-        assert!(rewrite_passage(&raw, "missing phrase", 1, "X").is_err());
-    }
+    // ── rewrite_existing_span ─────────────────────────────────────────────────
 
     #[test]
-    fn rewrite_existing_span_replaces_with_new_id() {
-        let raw = create("ch-01", "Chapter", None, "The collapse is dramatic.");
-        let (raw, old_id) =
-            rewrite_passage(&raw, "collapse is dramatic", 1, "fall is sudden").unwrap();
-        let (new_raw, new_id) =
-            rewrite_existing_span(&raw, old_id, "drop is rapid").unwrap();
-        assert!(new_id > old_id);
-        let content = reconstruct(&new_raw).unwrap();
-        assert!(content.contains(&format!(r#"<span data-rewrite-id="{}">drop is rapid</span>"#, new_id)));
-        assert!(!content.contains(&format!(r#"data-rewrite-id="{}""#, old_id)));
-    }
-
-    #[test]
-    fn rewrite_existing_span_html_escapes_content() {
-        let raw = create("ch-01", "Chapter", None, "The collapse here.");
-        let (raw, old_id) = rewrite_passage(&raw, "collapse", 1, "first").unwrap();
-        let (new_raw, _) = rewrite_existing_span(&raw, old_id, "A < B").unwrap();
-        assert!(reconstruct(&new_raw).unwrap().contains("A &lt; B"));
+    fn rewrite_existing_span_replaces_span() {
+        let content = "The collapse is here.";
+        let raw = create(content);
+        let start = byte_end_of(content, "The ", 1);
+        let end = byte_end_of(content, "collapse", 1);
+        let (raw, old_id) = rewrite_passage_at(&raw, start, end, "first replacement").unwrap();
+        let (new_raw, new_id) = rewrite_existing_span(&raw, &old_id, "second replacement").unwrap();
+        assert_ne!(new_id, old_id);
+        let page = read(&new_raw).unwrap();
+        assert!(page.content.contains("second replacement"));
+        assert!(!page.content.contains(&format!(r#"data-rewrite-id="{}""#, old_id)));
     }
 
     #[test]
     fn rewrite_existing_span_errors_for_unknown_id() {
-        let raw = create("ch-01", "Chapter", None, "Just plain text.");
-        assert!(rewrite_existing_span(&raw, 99, "X").is_err());
+        let raw = create("Just plain text.");
+        assert!(rewrite_existing_span(&raw, "deadbeef", "X").is_err());
     }
 
-    #[test]
-    fn rewrite_passage_id_never_reused_after_future_features() {
-        // The next_rewrite_id counter advances even if a span is later replaced
-        // (replacement logic isn't here yet, but the counter must be stable).
-        let raw = create("ch-01", "Chapter", None, "A B C D E F.");
-        let (raw, id1) = rewrite_passage(&raw, "A B C", 1, "ABC").unwrap();
-        let (_, id2) = rewrite_passage(&raw, "D E F", 1, "DEF").unwrap();
-        assert_eq!(id1, 1);
-        assert_eq!(id2, 2);
-    }
-
-    const SVG: &str = r#"<svg viewBox="0 0 100 50"><rect width="100" height="50"/></svg>"#;
+    // ── add_artifact_at ───────────────────────────────────────────────────────
 
     #[test]
-    fn add_artifact_wide_places_image_on_its_own_paragraph() {
-        let raw = create("ch-01", "Chapter", None, "The collapse is shown here.");
-        let (new_raw, art) =
-            add_artifact(&raw, "collapse", 1, "A collapsing star", 2.0, "image").unwrap();
-        assert_eq!(art.id, 1);
-        let content = reconstruct(&new_raw).unwrap();
-        assert_eq!(
-            content,
-            "The collapse is shown here.\n\n![A collapsing star](epar://1)"
-        );
-    }
-
-    #[test]
-    fn add_artifact_tall_places_image_inline() {
-        let raw = create("ch-01", "Chapter", None, "The collapse is shown here.");
-        let (new_raw, _) =
-            add_artifact(&raw, "collapse", 1, "Tall image", 0.5, "image").unwrap();
-        let content = reconstruct(&new_raw).unwrap();
-        assert_eq!(
-            content,
-            "The collapse ![Tall image](epar://1) is shown here."
-        );
-    }
-
-    #[test]
-    fn add_artifact_stores_metadata_and_epar_ref() {
-        let raw = create("ch-01", "Chapter", None, "The collapse is shown here.");
-        let (new_raw, art) =
-            add_artifact(&raw, "collapse", 1, "A collapsing star", 2.0, "image").unwrap();
-        // Body lives on disk — no ARTIFACT block in the file.
-        assert!(!new_raw.contains("ARTIFACT:"));
-        // The epar:// reference is inserted into the chapter content.
-        assert!(new_raw.contains("epar://1"));
-        assert_eq!(art.mime_type, "image/svg+xml");
-        assert_eq!(art.semantic_type, "image");
-        assert_eq!(art.aspect_ratio, 2.0);
-        assert_eq!(art.source, "collapse");
-
+    fn add_artifact_wide_places_block_paragraph() {
+        let content = "The collapse is shown here.";
+        let raw = create(content);
+        let src = byte_end_of(content, "collapse", 1);
+        let new_raw = add_artifact_at(&raw, 0, src, "abc123.svg", "A star", 2.0, "image").unwrap();
         let page = read(&new_raw).unwrap();
-        assert_eq!(page.artifacts.len(), 1);
-        assert_eq!(page.artifacts[0].caption.as_deref(), Some("A collapsing star"));
+        assert!(page.content.contains("![A star](epar://abc123.svg)"));
+        // Block image should be on its own paragraph.
+        assert!(page.content.contains("\n\n![A star](epar://abc123.svg)"));
     }
 
     #[test]
-    fn add_artifact_increments_id() {
-        let raw = create("ch-01", "Chapter", None, "First spot and second spot here.");
-        let (raw, a1) = add_artifact(&raw, "First spot", 1, "one", 2.0, "image").unwrap();
-        let (_, a2) = add_artifact(&raw, "second spot", 1, "two", 2.0, "image").unwrap();
-        assert_eq!(a1.id, 1);
-        assert_eq!(a2.id, 2);
+    fn add_artifact_tall_places_inline() {
+        let content = "The collapse is shown here.";
+        let raw = create(content);
+        let src = byte_end_of(content, "collapse", 1);
+        let new_raw = add_artifact_at(&raw, 0, src, "abc123.svg", "Tall", 0.5, "image").unwrap();
+        let page = read(&new_raw).unwrap();
+        // Inline image inserted after "collapse".
+        assert!(page.content.contains("collapse ![Tall](epar://abc123.svg)"));
     }
 
     #[test]
     fn add_artifact_sanitizes_alt_text() {
-        let raw = create("ch-01", "Chapter", None, "The collapse here.");
-        let (new_raw, _) =
-            add_artifact(&raw, "collapse", 1, "weird [brackets] (parens)", 2.0, "image")
+        let content = "The collapse here.";
+        let raw = create(content);
+        let src = byte_end_of(content, "collapse", 1);
+        let new_raw =
+            add_artifact_at(&raw, 0, src, "abc.svg", "weird [brackets] (parens)", 2.0, "image")
                 .unwrap();
-        let content = reconstruct(&new_raw).unwrap();
-        // Alt text has brackets/parens stripped so markdown stays valid.
-        assert!(content.contains("![weird brackets parens](epar://1)"));
-        // But the stored caption keeps the original text.
         let page = read(&new_raw).unwrap();
-        assert_eq!(
-            page.artifacts[0].caption.as_deref(),
-            Some("weird [brackets] (parens)")
-        );
+        assert!(page.content.contains("![weird brackets parens](epar://abc.svg)"));
+    }
+
+    // ── delete_artifact ───────────────────────────────────────────────────────
+
+    #[test]
+    fn delete_artifact_removes_block_image() {
+        let content = "The collapse is shown here.";
+        let raw = create(content);
+        let src = byte_end_of(content, "collapse", 1);
+        let new_raw =
+            add_artifact_at(&raw, 0, src, "sha1a.svg", "cap", 2.0, "image").unwrap();
+        let new_raw = delete_artifact(&new_raw, "sha1a.svg").unwrap();
+        let page = read(&new_raw).unwrap();
+        assert_eq!(page.content, content);
+        assert!(!new_raw.contains("epar://sha1a.svg"));
     }
 
     #[test]
-    fn add_artifact_errors_when_selection_missing() {
-        let raw = create("ch-01", "Chapter", None, "Nothing relevant here.");
-        assert!(add_artifact(&raw, "absent phrase", 1, "x", 2.0, "image").is_err());
-    }
-
-    #[test]
-    fn delete_artifact_removes_block_image_cleanly() {
-        let raw = create("ch-01", "Chapter", None, "The collapse is shown here.");
-        let (raw, _) = add_artifact(&raw, "collapse", 1, "cap", 2.0, "image").unwrap();
-        let raw = delete_artifact(&raw, 1).unwrap();
-        assert_eq!(reconstruct(&raw).unwrap(), "The collapse is shown here.");
-        assert!(read(&raw).unwrap().artifacts.is_empty());
-        assert!(!raw.contains("ARTIFACT:1"));
-    }
-
-    #[test]
-    fn delete_artifact_removes_inline_image_cleanly() {
-        let raw = create("ch-01", "Chapter", None, "The collapse is shown here.");
-        let (raw, _) = add_artifact(&raw, "collapse", 1, "cap", 0.5, "image").unwrap();
-        // Sanity: it was inserted inline.
-        assert_eq!(
-            reconstruct(&raw).unwrap(),
-            "The collapse ![cap](epar://1) is shown here."
-        );
-        let raw = delete_artifact(&raw, 1).unwrap();
-        assert_eq!(reconstruct(&raw).unwrap(), "The collapse is shown here.");
-        assert!(read(&raw).unwrap().artifacts.is_empty());
-    }
-
-    #[test]
-    fn delete_artifact_preserves_other_artifacts() {
-        let raw = create("ch-01", "Chapter", None, "First spot and second spot here.");
-        let (raw, _) = add_artifact(&raw, "First spot", 1, "one", 0.5, "image").unwrap();
-        let (raw, _) = add_artifact(&raw, "second spot", 1, "two", 0.5, "image").unwrap();
-        let raw = delete_artifact(&raw, 1).unwrap();
-        let page = read(&raw).unwrap();
-        assert_eq!(page.artifacts.len(), 1);
-        assert_eq!(page.artifacts[0].id, 2);
-        assert!(page.content.contains("![two](epar://2)"));
-        assert!(!page.content.contains("epar://1"));
+    fn delete_artifact_removes_inline_image() {
+        let content = "The collapse is shown here.";
+        let raw = create(content);
+        let src = byte_end_of(content, "collapse", 1);
+        let new_raw =
+            add_artifact_at(&raw, 0, src, "sha1b.svg", "cap", 0.5, "image").unwrap();
+        let new_raw = delete_artifact(&new_raw, "sha1b.svg").unwrap();
+        let page = read(&new_raw).unwrap();
+        assert_eq!(page.content, content);
     }
 
     #[test]
     fn delete_artifact_errors_for_unknown_id() {
-        let raw = create("ch-01", "Chapter", None, "Nothing here.");
-        assert!(delete_artifact(&raw, 99).is_err());
+        let raw = create("Nothing here.");
+        assert!(delete_artifact(&raw, "nosuchid.svg").is_err());
+    }
+
+    // ── regenerate_artifact ───────────────────────────────────────────────────
+
+    #[test]
+    fn regenerate_artifact_updates_id_in_block() {
+        let content = "The collapse is shown here.";
+        let raw = create(content);
+        let src = byte_end_of(content, "collapse", 1);
+        let raw = add_artifact_at(&raw, 0, src, "old.svg", "cap", 2.0, "image").unwrap();
+        let new_raw = regenerate_artifact(&raw, "old.svg", "new.svg", "new cap", 2.5).unwrap();
+        let page = read(&new_raw).unwrap();
+        assert!(page.content.contains("epar://new.svg"));
+        assert!(!page.content.contains("epar://old.svg"));
     }
 
     #[test]
-    fn regenerate_artifact_swaps_svg_and_metadata_without_moving() {
-        let raw = create("ch-01", "Chapter", None, "The collapse is shown here.");
-        let (raw, _) = add_artifact(&raw, "collapse", 1, "cap", 2.0, "image").unwrap();
-        let (raw, meta) = regenerate_artifact(&raw, 1, "image/svg+xml", "new cap", 2.5).unwrap();
-        assert_eq!(meta.aspect_ratio, 2.5);
-        let page = read(&raw).unwrap();
-        // body lives on disk (written by lib.rs); only metadata is in the file
-        assert_eq!(page.artifacts[0].caption.as_deref(), Some("new cap"));
-        // Still wide → still a block paragraph, body marker unchanged.
-        assert_eq!(page.content, "The collapse is shown here.\n\n![cap](epar://1)");
-    }
-
-    #[test]
-    fn regenerate_artifact_moves_block_to_inline_when_now_tall() {
-        let raw = create("ch-01", "Chapter", None, "The collapse is shown here.");
-        let (raw, _) = add_artifact(&raw, "collapse", 1, "cap", 2.0, "image").unwrap();
-        let (raw, _) = regenerate_artifact(&raw, 1, "image/svg+xml", "tall", 0.5).unwrap();
-        let page = read(&raw).unwrap();
-        assert_eq!(page.artifacts[0].aspect_ratio, 0.5);
-        assert_eq!(page.content, "The collapse is shown here. ![tall](epar://1)");
-    }
-
-    #[test]
-    fn regenerate_artifact_moves_inline_to_block_when_now_wide() {
-        let raw = create("ch-01", "Chapter", None, "The collapse is shown here.");
-        let (raw, _) = add_artifact(&raw, "collapse", 1, "cap", 0.5, "image").unwrap();
-        let (raw, _) = regenerate_artifact(&raw, 1, "image/svg+xml", "wide", 2.0).unwrap();
-        let page = read(&raw).unwrap();
-        assert_eq!(page.artifacts[0].aspect_ratio, 2.0);
-        assert_eq!(page.content, "The collapse is shown here.\n\n![wide](epar://1)");
+    fn regenerate_artifact_block_to_inline() {
+        let content = "The collapse is shown here.";
+        let raw = create(content);
+        let src = byte_end_of(content, "collapse", 1);
+        let raw = add_artifact_at(&raw, 0, src, "old.svg", "cap", 2.0, "image").unwrap();
+        let new_raw = regenerate_artifact(&raw, "old.svg", "new.svg", "tall", 0.5).unwrap();
+        let page = read(&new_raw).unwrap();
+        // Should now be inline.
+        assert!(page.content.contains("epar://new.svg"));
+        assert!(!page.content.contains("\n\n![tall](epar://new.svg)"));
     }
 
     #[test]
     fn regenerate_artifact_errors_for_unknown_id() {
-        let raw = create("ch-01", "Chapter", None, "Nothing here.");
-        assert!(regenerate_artifact(&raw, 99, "image/svg+xml", "x", 1.0).is_err());
+        let raw = create("Nothing here.");
+        assert!(regenerate_artifact(&raw, "nosuch.svg", "new.svg", "cap", 1.0).is_err());
     }
 
-    #[test]
-    fn insert_appendix_ref_adds_marker_after_target() {
-        let raw = create("ch-01", "Chapter", None, "See the gravitational collapse here.");
-        let new_raw =
-            insert_appendix_ref(&raw, 1, "gravitational collapse", 1).unwrap();
-        let content = reconstruct(&new_raw).unwrap();
-        assert_eq!(content, "See the gravitational collapse[^A1] here.");
-    }
+    // ── insert_appendix_ref_at ────────────────────────────────────────────────
 
     #[test]
-    fn insert_appendix_ref_uses_given_sequence_number() {
-        let raw = create("ch-01", "Chapter", None, "See the collapse here.");
-        let new_raw = insert_appendix_ref(&raw, 4, "collapse", 1).unwrap();
-        let content = reconstruct(&new_raw).unwrap();
-        assert!(content.contains("[^A4]"));
-    }
-
-    #[test]
-    fn insert_appendix_ref_does_not_add_note_metadata() {
-        let raw = create("ch-01", "Chapter", None, "See the collapse here.");
-        let new_raw = insert_appendix_ref(&raw, 1, "collapse", 1).unwrap();
+    fn insert_appendix_ref_adds_marker() {
+        let content = "See the gravitational collapse here.";
+        let raw = create(content);
+        let e = byte_end_of(content, "gravitational collapse", 1);
+        let new_raw = insert_appendix_ref_at(&raw, 1, e).unwrap();
         let page = read(&new_raw).unwrap();
-        assert!(page.notes.is_empty());
-    }
-
-    #[test]
-    fn add_note_endnote_uses_double_dagger_marker() {
-        let raw = create("ch-01", "Chapter", None, "The Hawking radiation is subtle.");
-        let (new_raw, note) = add_note(
-            &raw,
-            NoteType::Endnote,
-            "Hawking radiation",
-            1,
-            "An endnote explaining Hawking radiation in some depth.",
-        )
-        .unwrap();
-        assert_eq!(note.note_type, NoteType::Endnote);
-        let content = reconstruct(&new_raw).unwrap();
-        assert_eq!(content, "The Hawking radiation[^‡1] is subtle.");
-    }
-
-    #[test]
-    fn delete_note_removes_endnote_anchor() {
-        let raw = create("ch-01", "Chapter", None, "Note the Hawking radiation here.");
-        let (raw, _) =
-            add_note(&raw, NoteType::Endnote, "Hawking radiation", 1, "Endnote body").unwrap();
-        let raw = delete_note(&raw, 1).unwrap();
         assert_eq!(
-            reconstruct(&raw).unwrap(),
-            "Note the Hawking radiation here."
+            page.content,
+            "See the gravitational collapse[^A1] here."
         );
-        assert!(read(&raw).unwrap().notes.is_empty());
+    }
+
+    // ── footnote def parsing ──────────────────────────────────────────────────
+
+    #[test]
+    fn extract_footnote_defs_handles_definition_and_footnote() {
+        let body = "Some text.[^*1]\n\n[^*1]: Definition body.\n[^†2]: Footnote body.";
+        let (content, defs) = extract_footnote_defs(body);
+        assert_eq!(content, "Some text.[^*1]");
+        assert_eq!(defs.len(), 2);
+        assert_eq!(defs[0], ('*', 1, "Definition body.".to_string()));
+        assert_eq!(defs[1], ('†', 2, "Footnote body.".to_string()));
     }
 
     #[test]
-    fn delete_note_removes_footnote_dagger_anchor() {
-        let raw = create("ch-01", "Chapter", None, "Look at the gravitational collapse here.");
-        let (raw, _) = add_note(
-            &raw,
-            NoteType::Footnote,
-            "gravitational collapse",
-            1,
-            "Footnote body",
-        )
-        .unwrap();
-        let raw = delete_note(&raw, 1).unwrap();
-        let content = reconstruct(&raw).unwrap();
-        assert_eq!(content, "Look at the gravitational collapse here.");
-        let page = read(&raw).unwrap();
-        assert!(page.notes.is_empty());
+    fn extract_footnote_defs_handles_multiline_body() {
+        let body = "Content.\n\n[^*1]: First line.\n    Continuation.";
+        let (content, defs) = extract_footnote_defs(body);
+        assert_eq!(content, "Content.");
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].2, "First line.\nContinuation.");
     }
 
     #[test]
-    fn delete_note_returns_error_for_unknown_id() {
-        let raw = create("ch-01", "Chapter", None, "Nothing here.");
-        assert!(delete_note(&raw, 99).is_err());
+    fn round_trip_note_body_preserved() {
+        let content = "The blackhole is here.";
+        let raw = create(content);
+        let e = byte_end_of(content, "blackhole", 1);
+        let (new_raw, _) =
+            add_note_at(&raw, NoteType::Definition, "blackhole", e, "A region of spacetime.").unwrap();
+        let page = read(&new_raw).unwrap();
+        assert_eq!(page.notes[0].body, "A region of spacetime.");
+    }
+
+    // ── parse_footnote_def_header ─────────────────────────────────────────────
+
+    #[test]
+    fn parse_def_header_asterisk() {
+        let (m, id, body) = parse_footnote_def_header("[^*3]: Some text.").unwrap();
+        assert_eq!(m, '*');
+        assert_eq!(id, 3);
+        assert_eq!(body, "Some text.");
     }
 
     #[test]
-    fn read_returns_notes_with_bodies_after_add() {
-        let raw = create("ch-01", "Chapter", None, "The blackhole is here.");
-        let (raw, _) =
-            add_note(&raw, NoteType::Definition, "blackhole", 1, "Definition body").unwrap();
-        let page = read(&raw).unwrap();
-        assert_eq!(page.notes.len(), 1);
-        assert_eq!(page.notes[0].id, 1);
-        assert_eq!(page.notes[0].word, "blackhole");
-        assert_eq!(page.notes[0].body, "Definition body");
-        assert_eq!(page.content, "The blackhole[^*1] is here.");
+    fn parse_def_header_dagger() {
+        let (m, id, _) = parse_footnote_def_header("[^†10]: Body.").unwrap();
+        assert_eq!(m, '†');
+        assert_eq!(id, 10);
+    }
+
+    #[test]
+    fn parse_def_header_rejects_regular_text() {
+        assert!(parse_footnote_def_header("[^A1]: Appendix.").is_none());
+        assert!(parse_footnote_def_header("Just a line.").is_none());
     }
 }
