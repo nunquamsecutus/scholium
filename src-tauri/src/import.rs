@@ -74,7 +74,7 @@ pub fn book_title_from_dirname(name: &str) -> String {
 /// Build the book file layout at `dest_path` from `source_dir` and the
 /// caller-provided chapter order. Returns the loaded manifest.
 ///
-/// `dest_path` is the user-chosen `.edubook` save location (mirroring the
+/// `dest_path` is the user-chosen `.scholium` save location (mirroring the
 /// create_book flow). Each markdown file becomes an `.edupage` under
 /// `chapters/`; a manifest is written at `dest_path`.
 pub fn import_book(
@@ -92,7 +92,7 @@ pub fn import_book(
         .ok_or("invalid destination path")?
         .to_string();
     let book_dir = dest_path.parent().ok_or("invalid destination path")?.join(&stem);
-    let manifest_path = book_dir.join(format!("{stem}.edubook"));
+    let manifest_path = book_dir.join(format!("{stem}.scholium"));
 
     std::fs::create_dir_all(book_dir.join("chapters"))
         .map_err(|e| format!("failed to create chapters dir: {e}"))?;
@@ -199,7 +199,7 @@ mod tests {
 
         let book_root = temp_dir();
         std::fs::create_dir_all(&book_root).unwrap();
-        let dest = book_root.join("my-book.edubook");
+        let dest = book_root.join("my-book.scholium");
 
         let order = vec!["b.md".to_string(), "a.md".to_string()];
         let manifest = import_book(&src, &dest, &order).unwrap();
@@ -222,7 +222,7 @@ mod tests {
         }
 
         // Manifest itself is on disk where we expect.
-        assert!(book_dir.join("my-book.edubook").exists());
+        assert!(book_dir.join("my-book.scholium").exists());
 
         std::fs::remove_dir_all(&src).ok();
         std::fs::remove_dir_all(&book_root).ok();

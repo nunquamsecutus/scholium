@@ -26,8 +26,8 @@ export default function ImportView(props: Props) {
     setError("");
     const dest = await save({
       title: "Save imported book",
-      defaultPath: `${basename(props.directory)}.edubook`,
-      filters: [{ name: "EduPage Book", extensions: ["edubook"] }],
+      defaultPath: `${basename(props.directory)}.scholium`,
+      filters: [{ name: "Scholium Book", extensions: ["scholium"] }],
     });
     if (!dest) return;
 

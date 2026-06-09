@@ -1331,7 +1331,7 @@ fn create_book(
     let parent = dialog_path.parent().ok_or("invalid save path")?;
 
     let book_dir = parent.join(&stem);
-    let manifest_path = book_dir.join(format!("{stem}.edubook"));
+    let manifest_path = book_dir.join(format!("{stem}.scholium"));
 
     std::fs::create_dir_all(book_dir.join("chapters"))
         .map_err(|e| format!("failed to create chapters dir: {e}"))?;
@@ -1395,7 +1395,7 @@ fn import_book(
         .parent()
         .ok_or("invalid destination path")?
         .join(&stem)
-        .join(format!("{stem}.edubook"));
+        .join(format!("{stem}.scholium"));
     *state.book_path.lock().unwrap() = Some(manifest_path);
 
     Ok(book)

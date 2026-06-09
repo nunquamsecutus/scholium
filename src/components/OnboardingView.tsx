@@ -125,7 +125,7 @@ export default function OnboardingView(props: Props) {
 
     const dialogPath = await save({
       title: "Save Book",
-      filters: [{ name: "Edu Book", extensions: ["edubook"] }],
+      filters: [{ name: "Scholium Book", extensions: ["scholium"] }],
     });
     if (!dialogPath) return;
 

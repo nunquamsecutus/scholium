@@ -64,7 +64,7 @@ describe("ImportView", () => {
   });
 
   it("invokes import_book with the ordered files and fires onImported", async () => {
-    mockSave.mockResolvedValueOnce("/tmp/dest/my-book.edubook");
+    mockSave.mockResolvedValueOnce("/tmp/dest/my-book.scholium");
     const manifest = { version: 1, metadata: {}, lessonPlan: { chapters: [] } };
     mockInvoke.mockResolvedValueOnce(manifest);
     const onImported = vi.fn();
@@ -82,7 +82,7 @@ describe("ImportView", () => {
         "import_book",
         expect.objectContaining({
           sourceDir: "/tmp/src",
-          destPath: "/tmp/dest/my-book.edubook",
+          destPath: "/tmp/dest/my-book.scholium",
           orderedFiles: ["a.md", "b.md"],
         }),
       );

@@ -43,7 +43,7 @@ export default function WelcomeModal(props: Props) {
     setError("");
     const result = await open({
       title: "Open Book",
-      filters: [{ name: "Edu Book", extensions: ["edubook"] }],
+      filters: [{ name: "Scholium Book", extensions: ["scholium"] }],
       multiple: false,
     });
     if (!result) return;
