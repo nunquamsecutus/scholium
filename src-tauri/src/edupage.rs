@@ -1682,12 +1682,14 @@ mod tests {
     }
 
     #[test]
-    fn add_artifact_stores_svg_and_metadata() {
+    fn add_artifact_stores_metadata_and_epar_ref() {
         let raw = create("ch-01", "Chapter", None, "The collapse is shown here.");
         let (new_raw, art) =
             add_artifact(&raw, "collapse", 1, "A collapsing star", 2.0, "image").unwrap();
-        assert!(new_raw.contains("======! ch-01|ARTIFACT:1 !======"));
-        assert!(new_raw.contains(SVG));
+        // Body lives on disk — no ARTIFACT block in the file.
+        assert!(!new_raw.contains("ARTIFACT:"));
+        // The epar:// reference is inserted into the chapter content.
+        assert!(new_raw.contains("epar://1"));
         assert_eq!(art.mime_type, "image/svg+xml");
         assert_eq!(art.semantic_type, "image");
         assert_eq!(art.aspect_ratio, 2.0);
@@ -1695,7 +1697,6 @@ mod tests {
 
         let page = read(&new_raw).unwrap();
         assert_eq!(page.artifacts.len(), 1);
-        assert_eq!(page.artifacts[0].body, SVG);
         assert_eq!(page.artifacts[0].caption.as_deref(), Some("A collapsing star"));
     }
 
@@ -1778,7 +1779,6 @@ mod tests {
     fn regenerate_artifact_swaps_svg_and_metadata_without_moving() {
         let raw = create("ch-01", "Chapter", None, "The collapse is shown here.");
         let (raw, _) = add_artifact(&raw, "collapse", 1, "cap", 2.0, "image").unwrap();
-        let new_svg = r#"<svg viewBox="0 0 100 40"><circle/></svg>"#;
         let (raw, meta) = regenerate_artifact(&raw, 1, "image/svg+xml", "new cap", 2.5).unwrap();
         assert_eq!(meta.aspect_ratio, 2.5);
         let page = read(&raw).unwrap();
