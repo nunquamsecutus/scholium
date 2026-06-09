@@ -1002,28 +1002,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
-name = "edu-harness"
-version = "0.1.0"
-dependencies = [
- "ammonia",
- "base64 0.22.1",
- "chrono",
- "keyring",
- "pulldown-cmark",
- "reqwest 0.12.28",
- "resvg",
- "serde",
- "serde_json",
- "sha1",
- "tauri",
- "tauri-build",
- "tauri-plugin-cli",
- "tauri-plugin-dialog",
- "tauri-plugin-opener",
- "uuid",
-]
-
-[[package]]
 name = "embed-resource"
 version = "3.0.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3584,6 +3562,28 @@ dependencies = [
  "quote",
  "serde_derive_internals",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "scholium"
+version = "0.1.0"
+dependencies = [
+ "ammonia",
+ "base64 0.22.1",
+ "chrono",
+ "keyring",
+ "pulldown-cmark",
+ "reqwest 0.12.28",
+ "resvg",
+ "serde",
+ "serde_json",
+ "sha1",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-cli",
+ "tauri-plugin-dialog",
+ "tauri-plugin-opener",
+ "uuid",
 ]
 
 [[package]]

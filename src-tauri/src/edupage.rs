@@ -163,7 +163,10 @@ pub struct ArtifactWithBody {
 pub struct EduPage {
     pub content: String,
     pub notes: Vec<NoteWithBody>,
-    pub artifacts: Vec<ArtifactWithBody>,
+    /// Artifact metadata only.  Bodies (SVG text / base64-encoded raster) live
+    /// as separate files in the book's `images/` directory and are loaded by
+    /// the caller when needed for rendering.
+    pub artifacts: Vec<ArtifactMeta>,
 }
 
 fn sha1_hex(content: &str) -> String {
@@ -180,9 +183,6 @@ fn note_delimiter(file_id: &str, note_id: u32) -> String {
     format!("======! {}|NOTE:{} !======", file_id, note_id)
 }
 
-fn artifact_delimiter(file_id: &str, artifact_id: u32) -> String {
-    format!("======! {}|ARTIFACT:{} !======", file_id, artifact_id)
-}
 
 fn parse_delimiter(line: &str) -> Option<(String, String)> {
     let inner = line.trim().strip_prefix("======!")?.strip_suffix("!======")?;
@@ -305,29 +305,10 @@ pub fn read(raw: &str) -> Result<EduPage, String> {
         })
         .collect();
 
-    let artifacts: Vec<ArtifactWithBody> = header
-        .artifacts
-        .iter()
-        .map(|meta| {
-            let key = format!("ARTIFACT:{}", meta.id);
-            let body = blocks.get(&key).cloned().unwrap_or_default();
-            ArtifactWithBody {
-                id: meta.id,
-                mime_type: meta.mime_type.clone(),
-                semantic_type: meta.semantic_type.clone(),
-                ctime: meta.ctime.clone(),
-                caption: meta.caption.clone(),
-                aspect_ratio: meta.aspect_ratio,
-                source: meta.source.clone(),
-                body,
-            }
-        })
-        .collect();
-
     Ok(EduPage {
         content,
         notes,
-        artifacts,
+        artifacts: header.artifacts.clone(),
     })
 }
 
@@ -470,7 +451,6 @@ pub fn delete_artifact(raw: &str, artifact_id: u32) -> Result<String, String> {
     header.artifacts.remove(art_idx);
 
     let header_json = serde_json::to_string_pretty(&header).expect("header serialization");
-    let deleted_key = format!("ARTIFACT:{}", artifact_id);
     let raw_lines: Vec<&str> = raw.lines().collect();
     let delimiters: Vec<(usize, String, String)> = raw_lines
         .iter()
@@ -481,8 +461,8 @@ pub fn delete_artifact(raw: &str, artifact_id: u32) -> Result<String, String> {
     let mut new_file = header_json;
     new_file.push('\n');
     for (idx, (line_idx, _, key)) in delimiters.iter().enumerate() {
-        if key == &deleted_key {
-            continue;
+        if key.starts_with("ARTIFACT:") {
+            continue; // bodies now live on disk; no block to preserve
         }
         let start = *line_idx;
         let end = if idx + 1 < delimiters.len() {
@@ -508,7 +488,6 @@ pub fn delete_artifact(raw: &str, artifact_id: u32) -> Result<String, String> {
 pub fn regenerate_artifact(
     raw: &str,
     artifact_id: u32,
-    new_body: &str,
     new_mime_type: &str,
     new_caption: &str,
     new_aspect: f32,
@@ -582,7 +561,6 @@ pub fn regenerate_artifact(
     }
 
     let header_json = serde_json::to_string_pretty(&header).expect("header serialization");
-    let artifact_key = format!("ARTIFACT:{}", artifact_id);
     let raw_lines: Vec<&str> = raw.lines().collect();
     let delimiters: Vec<(usize, String, String)> = raw_lines
         .iter()
@@ -593,22 +571,17 @@ pub fn regenerate_artifact(
     let mut new_file = header_json;
     new_file.push('\n');
     for (di, (line_idx, _, key)) in delimiters.iter().enumerate() {
+        if key.starts_with("ARTIFACT:") {
+            continue; // bodies now live on disk
+        }
         let start = *line_idx;
         let end = if di + 1 < delimiters.len() {
             delimiters[di + 1].0
         } else {
             raw_lines.len()
         };
-        if key == &artifact_key {
-            // Keep the delimiter line, swap the block body for the new content.
-            new_file.push_str(raw_lines[start]);
-            new_file.push('\n');
-            new_file.push_str(new_body);
-            new_file.push('\n');
-        } else {
-            new_file.push_str(&raw_lines[start..end].join("\n"));
-            new_file.push('\n');
-        }
+        new_file.push_str(&raw_lines[start..end].join("\n"));
+        new_file.push('\n');
     }
     if let Some((sha1, block)) = extra_edit {
         new_file.push_str(&delimiter(&file_id, &sha1));
@@ -961,7 +934,6 @@ pub fn add_artifact_at(
     raw: &str,
     src_start: usize,
     src_end: usize,
-    body: &str,
     mime_type: &str,
     caption: &str,
     aspect_ratio: f32,
@@ -1057,10 +1029,6 @@ pub fn add_artifact_at(
     new_file.push_str(&delimiter(&file_id, &new_sha1));
     new_file.push('\n');
     new_file.push_str(&new_block);
-    new_file.push('\n');
-    new_file.push_str(&artifact_delimiter(&file_id, artifact_id));
-    new_file.push('\n');
-    new_file.push_str(body);
 
     Ok((new_file, artifact))
 }
@@ -1302,7 +1270,6 @@ mod tests {
         raw: &str,
         selection: &str,
         occurrence_index: u32,
-        svg: &str,
         caption: &str,
         aspect_ratio: f32,
         semantic_type: &str,
@@ -1353,10 +1320,6 @@ mod tests {
         new_file.push_str(&delimiter(&file_id, &new_sha1));
         new_file.push('\n');
         new_file.push_str(&new_block);
-        new_file.push('\n');
-        new_file.push_str(&artifact_delimiter(&file_id, artifact_id));
-        new_file.push('\n');
-        new_file.push_str(svg);
         Ok((new_file, artifact))
     }
 
@@ -1697,7 +1660,7 @@ mod tests {
     fn add_artifact_wide_places_image_on_its_own_paragraph() {
         let raw = create("ch-01", "Chapter", None, "The collapse is shown here.");
         let (new_raw, art) =
-            add_artifact(&raw, "collapse", 1, SVG, "A collapsing star", 2.0, "image").unwrap();
+            add_artifact(&raw, "collapse", 1, "A collapsing star", 2.0, "image").unwrap();
         assert_eq!(art.id, 1);
         let content = reconstruct(&new_raw).unwrap();
         assert_eq!(
@@ -1710,7 +1673,7 @@ mod tests {
     fn add_artifact_tall_places_image_inline() {
         let raw = create("ch-01", "Chapter", None, "The collapse is shown here.");
         let (new_raw, _) =
-            add_artifact(&raw, "collapse", 1, SVG, "Tall image", 0.5, "image").unwrap();
+            add_artifact(&raw, "collapse", 1, "Tall image", 0.5, "image").unwrap();
         let content = reconstruct(&new_raw).unwrap();
         assert_eq!(
             content,
@@ -1722,7 +1685,7 @@ mod tests {
     fn add_artifact_stores_svg_and_metadata() {
         let raw = create("ch-01", "Chapter", None, "The collapse is shown here.");
         let (new_raw, art) =
-            add_artifact(&raw, "collapse", 1, SVG, "A collapsing star", 2.0, "image").unwrap();
+            add_artifact(&raw, "collapse", 1, "A collapsing star", 2.0, "image").unwrap();
         assert!(new_raw.contains("======! ch-01|ARTIFACT:1 !======"));
         assert!(new_raw.contains(SVG));
         assert_eq!(art.mime_type, "image/svg+xml");
@@ -1739,8 +1702,8 @@ mod tests {
     #[test]
     fn add_artifact_increments_id() {
         let raw = create("ch-01", "Chapter", None, "First spot and second spot here.");
-        let (raw, a1) = add_artifact(&raw, "First spot", 1, SVG, "one", 2.0, "image").unwrap();
-        let (_, a2) = add_artifact(&raw, "second spot", 1, SVG, "two", 2.0, "image").unwrap();
+        let (raw, a1) = add_artifact(&raw, "First spot", 1, "one", 2.0, "image").unwrap();
+        let (_, a2) = add_artifact(&raw, "second spot", 1, "two", 2.0, "image").unwrap();
         assert_eq!(a1.id, 1);
         assert_eq!(a2.id, 2);
     }
@@ -1749,7 +1712,7 @@ mod tests {
     fn add_artifact_sanitizes_alt_text() {
         let raw = create("ch-01", "Chapter", None, "The collapse here.");
         let (new_raw, _) =
-            add_artifact(&raw, "collapse", 1, SVG, "weird [brackets] (parens)", 2.0, "image")
+            add_artifact(&raw, "collapse", 1, "weird [brackets] (parens)", 2.0, "image")
                 .unwrap();
         let content = reconstruct(&new_raw).unwrap();
         // Alt text has brackets/parens stripped so markdown stays valid.
@@ -1765,24 +1728,23 @@ mod tests {
     #[test]
     fn add_artifact_errors_when_selection_missing() {
         let raw = create("ch-01", "Chapter", None, "Nothing relevant here.");
-        assert!(add_artifact(&raw, "absent phrase", 1, SVG, "x", 2.0, "image").is_err());
+        assert!(add_artifact(&raw, "absent phrase", 1, "x", 2.0, "image").is_err());
     }
 
     #[test]
     fn delete_artifact_removes_block_image_cleanly() {
         let raw = create("ch-01", "Chapter", None, "The collapse is shown here.");
-        let (raw, _) = add_artifact(&raw, "collapse", 1, SVG, "cap", 2.0, "image").unwrap();
+        let (raw, _) = add_artifact(&raw, "collapse", 1, "cap", 2.0, "image").unwrap();
         let raw = delete_artifact(&raw, 1).unwrap();
         assert_eq!(reconstruct(&raw).unwrap(), "The collapse is shown here.");
         assert!(read(&raw).unwrap().artifacts.is_empty());
         assert!(!raw.contains("ARTIFACT:1"));
-        assert!(!raw.contains(SVG));
     }
 
     #[test]
     fn delete_artifact_removes_inline_image_cleanly() {
         let raw = create("ch-01", "Chapter", None, "The collapse is shown here.");
-        let (raw, _) = add_artifact(&raw, "collapse", 1, SVG, "cap", 0.5, "image").unwrap();
+        let (raw, _) = add_artifact(&raw, "collapse", 1, "cap", 0.5, "image").unwrap();
         // Sanity: it was inserted inline.
         assert_eq!(
             reconstruct(&raw).unwrap(),
@@ -1796,8 +1758,8 @@ mod tests {
     #[test]
     fn delete_artifact_preserves_other_artifacts() {
         let raw = create("ch-01", "Chapter", None, "First spot and second spot here.");
-        let (raw, _) = add_artifact(&raw, "First spot", 1, SVG, "one", 0.5, "image").unwrap();
-        let (raw, _) = add_artifact(&raw, "second spot", 1, SVG, "two", 0.5, "image").unwrap();
+        let (raw, _) = add_artifact(&raw, "First spot", 1, "one", 0.5, "image").unwrap();
+        let (raw, _) = add_artifact(&raw, "second spot", 1, "two", 0.5, "image").unwrap();
         let raw = delete_artifact(&raw, 1).unwrap();
         let page = read(&raw).unwrap();
         assert_eq!(page.artifacts.len(), 1);
@@ -1815,12 +1777,12 @@ mod tests {
     #[test]
     fn regenerate_artifact_swaps_svg_and_metadata_without_moving() {
         let raw = create("ch-01", "Chapter", None, "The collapse is shown here.");
-        let (raw, _) = add_artifact(&raw, "collapse", 1, SVG, "cap", 2.0, "image").unwrap();
+        let (raw, _) = add_artifact(&raw, "collapse", 1, "cap", 2.0, "image").unwrap();
         let new_svg = r#"<svg viewBox="0 0 100 40"><circle/></svg>"#;
-        let (raw, meta) = regenerate_artifact(&raw, 1, new_svg, "image/svg+xml", "new cap", 2.5).unwrap();
+        let (raw, meta) = regenerate_artifact(&raw, 1, "image/svg+xml", "new cap", 2.5).unwrap();
         assert_eq!(meta.aspect_ratio, 2.5);
         let page = read(&raw).unwrap();
-        assert_eq!(page.artifacts[0].body, new_svg);
+        // body lives on disk (written by lib.rs); only metadata is in the file
         assert_eq!(page.artifacts[0].caption.as_deref(), Some("new cap"));
         // Still wide → still a block paragraph, body marker unchanged.
         assert_eq!(page.content, "The collapse is shown here.\n\n![cap](epar://1)");
@@ -1829,8 +1791,8 @@ mod tests {
     #[test]
     fn regenerate_artifact_moves_block_to_inline_when_now_tall() {
         let raw = create("ch-01", "Chapter", None, "The collapse is shown here.");
-        let (raw, _) = add_artifact(&raw, "collapse", 1, SVG, "cap", 2.0, "image").unwrap();
-        let (raw, _) = regenerate_artifact(&raw, 1, SVG, "image/svg+xml", "tall", 0.5).unwrap();
+        let (raw, _) = add_artifact(&raw, "collapse", 1, "cap", 2.0, "image").unwrap();
+        let (raw, _) = regenerate_artifact(&raw, 1, "image/svg+xml", "tall", 0.5).unwrap();
         let page = read(&raw).unwrap();
         assert_eq!(page.artifacts[0].aspect_ratio, 0.5);
         assert_eq!(page.content, "The collapse is shown here. ![tall](epar://1)");
@@ -1839,8 +1801,8 @@ mod tests {
     #[test]
     fn regenerate_artifact_moves_inline_to_block_when_now_wide() {
         let raw = create("ch-01", "Chapter", None, "The collapse is shown here.");
-        let (raw, _) = add_artifact(&raw, "collapse", 1, SVG, "cap", 0.5, "image").unwrap();
-        let (raw, _) = regenerate_artifact(&raw, 1, SVG, "image/svg+xml", "wide", 2.0).unwrap();
+        let (raw, _) = add_artifact(&raw, "collapse", 1, "cap", 0.5, "image").unwrap();
+        let (raw, _) = regenerate_artifact(&raw, 1, "image/svg+xml", "wide", 2.0).unwrap();
         let page = read(&raw).unwrap();
         assert_eq!(page.artifacts[0].aspect_ratio, 2.0);
         assert_eq!(page.content, "The collapse is shown here.\n\n![wide](epar://1)");
@@ -1849,7 +1811,7 @@ mod tests {
     #[test]
     fn regenerate_artifact_errors_for_unknown_id() {
         let raw = create("ch-01", "Chapter", None, "Nothing here.");
-        assert!(regenerate_artifact(&raw, 99, SVG, "image/svg+xml", "x", 1.0).is_err());
+        assert!(regenerate_artifact(&raw, 99, "image/svg+xml", "x", 1.0).is_err());
     }
 
     #[test]

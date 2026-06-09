@@ -34,7 +34,6 @@ interface ArtifactFromBackend {
   caption: string | null;
   aspectRatio: number;
   source: string;
-  body: string;
 }
 
 interface ChapterContent {
