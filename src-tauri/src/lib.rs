@@ -2027,3 +2027,157 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_dir() -> std::path::PathBuf {
+        let dir = std::env::temp_dir()
+            .join(format!("scholium-lib-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    // ── ext_for_mime ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn ext_for_mime_svg() {
+        assert_eq!(ext_for_mime("image/svg+xml"), "svg");
+    }
+
+    #[test]
+    fn ext_for_mime_jpeg() {
+        assert_eq!(ext_for_mime("image/jpeg"), "jpg");
+    }
+
+    #[test]
+    fn ext_for_mime_png_and_unknown_default_to_png() {
+        assert_eq!(ext_for_mime("image/png"), "png");
+        assert_eq!(ext_for_mime("image/webp"), "png");
+        assert_eq!(ext_for_mime(""), "png");
+    }
+
+    // ── write_artifact_body ───────────────────────────────────────────────────
+
+    #[test]
+    fn write_artifact_body_writes_svg_as_text() {
+        let dir = temp_dir();
+        let svg = r#"<svg viewBox="0 0 100 50"><rect width="100" height="50"/></svg>"#;
+        write_artifact_body(svg, "image/svg+xml", 1, &dir).unwrap();
+        let written = std::fs::read_to_string(dir.join("1.svg")).unwrap();
+        assert_eq!(written, svg);
+    }
+
+    #[test]
+    fn write_artifact_body_decodes_raster_base64_to_bytes() {
+        use base64::Engine;
+        let dir = temp_dir();
+        let bytes: Vec<u8> = vec![137, 80, 78, 71, 13, 10, 26, 10]; // PNG magic header
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        write_artifact_body(&b64, "image/png", 2, &dir).unwrap();
+        let written = std::fs::read(dir.join("2.png")).unwrap();
+        assert_eq!(written, bytes);
+    }
+
+    #[test]
+    fn write_artifact_body_uses_jpg_extension_for_jpeg() {
+        use base64::Engine;
+        let dir = temp_dir();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(b"\xFF\xD8\xFF");
+        write_artifact_body(&b64, "image/jpeg", 3, &dir).unwrap();
+        assert!(dir.join("3.jpg").exists());
+    }
+
+    #[test]
+    fn write_artifact_body_errors_on_invalid_base64() {
+        let dir = temp_dir();
+        let result = write_artifact_body("not valid base64!!!", "image/png", 4, &dir);
+        assert!(result.is_err());
+    }
+
+    // ── load_artifact_bodies ─────────────────────────────────────────────────
+
+    fn sample_meta(id: u32, mime: &str) -> edupage::ArtifactMeta {
+        edupage::ArtifactMeta {
+            id,
+            mime_type: mime.to_string(),
+            semantic_type: "image".to_string(),
+            ctime: "2026-01-01T00:00:00Z".to_string(),
+            caption: None,
+            aspect_ratio: 1.5,
+            source: "test selection".to_string(),
+        }
+    }
+
+    #[test]
+    fn load_artifact_bodies_reads_svg_body_from_disk() {
+        let dir = temp_dir();
+        let svg = r#"<svg viewBox="0 0 10 10"><circle/></svg>"#;
+        std::fs::write(dir.join("1.svg"), svg).unwrap();
+
+        let bodies = load_artifact_bodies(&[sample_meta(1, "image/svg+xml")], &dir);
+        assert_eq!(bodies.len(), 1);
+        assert_eq!(bodies[0].id, 1);
+        assert_eq!(bodies[0].body, svg);
+        assert_eq!(bodies[0].mime_type, "image/svg+xml");
+    }
+
+    #[test]
+    fn load_artifact_bodies_base64_encodes_raster_from_disk() {
+        use base64::Engine;
+        let dir = temp_dir();
+        let bytes: Vec<u8> = vec![137, 80, 78, 71, 13, 10, 26, 10];
+        std::fs::write(dir.join("2.png"), &bytes).unwrap();
+
+        let bodies = load_artifact_bodies(&[sample_meta(2, "image/png")], &dir);
+        let expected = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        assert_eq!(bodies[0].body, expected);
+    }
+
+    #[test]
+    fn load_artifact_bodies_returns_empty_string_for_missing_file() {
+        let dir = temp_dir();
+        // No file written — simulates a missing or not-yet-generated image.
+        let bodies = load_artifact_bodies(&[sample_meta(99, "image/svg+xml")], &dir);
+        assert_eq!(bodies.len(), 1);
+        assert_eq!(bodies[0].body, ""); // graceful degradation, no panic
+    }
+
+    #[test]
+    fn load_artifact_bodies_preserves_metadata_fields() {
+        let dir = temp_dir();
+        std::fs::write(dir.join("5.svg"), "<svg/>").unwrap();
+        let mut meta = sample_meta(5, "image/svg+xml");
+        meta.caption = Some("a caption".to_string());
+        meta.aspect_ratio = 2.5;
+        meta.semantic_type = "diagram".to_string();
+
+        let bodies = load_artifact_bodies(&[meta], &dir);
+        assert_eq!(bodies[0].caption.as_deref(), Some("a caption"));
+        assert_eq!(bodies[0].aspect_ratio, 2.5);
+        assert_eq!(bodies[0].semantic_type, "diagram");
+    }
+
+    #[test]
+    fn write_then_load_roundtrip_svg() {
+        let dir = temp_dir();
+        let svg = r#"<svg viewBox="0 0 200 100"><text>Hello</text></svg>"#;
+        write_artifact_body(svg, "image/svg+xml", 7, &dir).unwrap();
+
+        let bodies = load_artifact_bodies(&[sample_meta(7, "image/svg+xml")], &dir);
+        assert_eq!(bodies[0].body, svg);
+    }
+
+    #[test]
+    fn write_then_load_roundtrip_png() {
+        use base64::Engine;
+        let dir = temp_dir();
+        let bytes: Vec<u8> = (0u8..=255).collect();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        write_artifact_body(&b64, "image/png", 8, &dir).unwrap();
+
+        let bodies = load_artifact_bodies(&[sample_meta(8, "image/png")], &dir);
+        assert_eq!(bodies[0].body, b64);
+    }
+}
