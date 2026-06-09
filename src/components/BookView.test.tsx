@@ -4,7 +4,9 @@ import BookView from "./BookView";
 import type { Manifest } from "../types/manifest";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
-vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn().mockResolvedValue(() => {}) }));
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: vi.fn().mockResolvedValue(() => {}),
+}));
 vi.mock("marked", () => ({ marked: { parse: (s: string) => `<p>${s}</p>` } }));
 vi.mock("dompurify", () => ({ default: { sanitize: (s: string) => s } }));
 
@@ -47,13 +49,19 @@ describe("BookView", () => {
   });
 
   it("clicking the book title returns to the overview", () => {
-    const { getByText, getByRole } = render(() => <BookView manifest={baseManifest} />);
+    const { getByText, getByRole } = render(() => (
+      <BookView manifest={baseManifest} />
+    ));
     // Navigate away from overview
     getByText("Stellar Evolution").closest("button")!.click();
-    expect(getByRole("button", { name: "Generate Chapter" })).toBeInTheDocument();
+    expect(
+      getByRole("button", { name: "Generate Chapter" }),
+    ).toBeInTheDocument();
     // Click title to go back
     (document.querySelector(".book-title") as HTMLElement).click();
-    expect(getByText("A journey into the universe's most extreme objects.")).toBeInTheDocument();
+    expect(
+      getByText("A journey into the universe's most extreme objects."),
+    ).toBeInTheDocument();
   });
 
   it("renders chapter titles in the sidebar", () => {
@@ -64,13 +72,19 @@ describe("BookView", () => {
 
   it("shows book overview with description before a chapter is selected", () => {
     const { getByText } = render(() => <BookView manifest={baseManifest} />);
-    expect(getByText("A journey into the universe's most extreme objects.")).toBeInTheDocument();
+    expect(
+      getByText("A journey into the universe's most extreme objects."),
+    ).toBeInTheDocument();
   });
 
   it("shows Generate Chapter button when the next planned chapter is selected", () => {
-    const { getByText, getByRole } = render(() => <BookView manifest={baseManifest} />);
+    const { getByText, getByRole } = render(() => (
+      <BookView manifest={baseManifest} />
+    ));
     getByText("Stellar Evolution").closest("button")!.click();
-    expect(getByRole("button", { name: "Generate Chapter" })).toBeInTheDocument();
+    expect(
+      getByRole("button", { name: "Generate Chapter" }),
+    ).toBeInTheDocument();
   });
 
   it("shows locked message when a planned chapter is selected but is not the next planned", () => {
@@ -78,18 +92,29 @@ describe("BookView", () => {
       ...baseManifest,
       lessonPlan: {
         ...baseManifest.lessonPlan,
-        chapters: baseManifest.lessonPlan.chapters.map((ch) => ({ ...ch, status: "planned" as const })),
+        chapters: baseManifest.lessonPlan.chapters.map((ch) => ({
+          ...ch,
+          status: "planned" as const,
+        })),
       },
     };
-    const { getByText, queryByRole } = render(() => <BookView manifest={allPlanned} />);
+    const { getByText, queryByRole } = render(() => (
+      <BookView manifest={allPlanned} />
+    ));
     getByText("Gravitational Collapse").closest("button")!.click();
-    expect(queryByRole("button", { name: "Generate Chapter" })).not.toBeInTheDocument();
+    expect(
+      queryByRole("button", { name: "Generate Chapter" }),
+    ).not.toBeInTheDocument();
     expect(getByText(/Generate the previous chapters/)).toBeInTheDocument();
   });
 
   it("applies status class to chapter items", () => {
     const { getByText } = render(() => <BookView manifest={baseManifest} />);
-    expect(getByText("Stellar Evolution").closest("button")).toHaveClass("chapter-item--planned");
-    expect(getByText("Gravitational Collapse").closest("button")).toHaveClass("chapter-item--generated");
+    expect(getByText("Stellar Evolution").closest("button")).toHaveClass(
+      "chapter-item--planned",
+    );
+    expect(getByText("Gravitational Collapse").closest("button")).toHaveClass(
+      "chapter-item--generated",
+    );
   });
 });

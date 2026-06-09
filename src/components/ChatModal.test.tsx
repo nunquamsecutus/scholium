@@ -4,7 +4,9 @@ import ChatModal from "./ChatModal";
 
 // Mock Tauri invoke
 const mockInvoke = vi.fn();
-vi.mock("@tauri-apps/api/core", () => ({ invoke: (...args: unknown[]) => mockInvoke(...args) }));
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: (...args: unknown[]) => mockInvoke(...args),
+}));
 
 const noopClose = vi.fn();
 const noopChanged = vi.fn();
@@ -22,7 +24,9 @@ describe("ChatModal", () => {
 
   it("renders the header and empty state", () => {
     renderModal();
-    expect(screen.getByRole("dialog", { name: "Chat with AI" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("dialog", { name: "Chat with AI" }),
+    ).toBeInTheDocument();
     expect(screen.getByText(/ask me anything/i)).toBeInTheDocument();
   });
 
@@ -55,16 +59,20 @@ describe("ChatModal", () => {
     await waitFor(() => {
       expect(screen.getByText("Hello from AI!")).toBeInTheDocument();
     });
-    expect(mockInvoke).toHaveBeenCalledWith("chat_about_book", expect.objectContaining({
-      history: expect.arrayContaining([
-        expect.objectContaining({ role: "user", content: "hi" }),
-      ]),
-    }));
+    expect(mockInvoke).toHaveBeenCalledWith(
+      "chat_about_book",
+      expect.objectContaining({
+        history: expect.arrayContaining([
+          expect.objectContaining({ role: "user", content: "hi" }),
+        ]),
+      }),
+    );
   });
 
   it("shows patch banner when reply contains a patch", async () => {
     mockInvoke.mockResolvedValue({
-      reply: "I'll rename it.\n```json\n{\"action\":\"rename_chapter\",\"id\":\"ch-01\",\"title\":\"New Title\"}\n```",
+      reply:
+        'I\'ll rename it.\n```json\n{"action":"rename_chapter","id":"ch-01","title":"New Title"}\n```',
       patch: { action: "rename_chapter", id: "ch-01", title: "New Title" },
     });
     renderModal();
@@ -72,16 +80,26 @@ describe("ChatModal", () => {
     fireEvent.input(input, { target: { value: "rename chapter 1" } });
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
     await waitFor(() => {
-      expect(screen.getByText(/Rename chapter "ch-01" to "New Title"/)).toBeInTheDocument();
+      expect(
+        screen.getByText(/Rename chapter "ch-01" to "New Title"/),
+      ).toBeInTheDocument();
       expect(screen.getByRole("button", { name: "Apply" })).toBeInTheDocument();
-      expect(screen.getByRole("button", { name: "Dismiss" })).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "Dismiss" }),
+      ).toBeInTheDocument();
     });
   });
 
   it("applies patch and notifies onManifestChanged", async () => {
     const updatedManifest = {
       version: 1,
-      metadata: { title: "Test", topic: "t", prompt: "p", created: "", modified: "" },
+      metadata: {
+        title: "Test",
+        topic: "t",
+        prompt: "p",
+        created: "",
+        modified: "",
+      },
       lessonPlan: { summary: "s", chapters: [] },
     };
     // First call: chat reply with patch
@@ -101,9 +119,12 @@ describe("ChatModal", () => {
     fireEvent.click(screen.getByRole("button", { name: "Apply" }));
 
     await waitFor(() => {
-      expect(mockInvoke).toHaveBeenCalledWith("apply_manifest_patch", expect.objectContaining({
-        patch: expect.objectContaining({ action: "rename_chapter" }),
-      }));
+      expect(mockInvoke).toHaveBeenCalledWith(
+        "apply_manifest_patch",
+        expect.objectContaining({
+          patch: expect.objectContaining({ action: "rename_chapter" }),
+        }),
+      );
       expect(noopChanged).toHaveBeenCalledWith(updatedManifest);
     });
   });
@@ -142,16 +163,25 @@ describe("ChatModal", () => {
       <ChatModal
         onClose={noopClose}
         onManifestChanged={noopChanged}
-        highlight={{ phrase: "the mitochondria is the powerhouse", context: "Cell biology chapter." }}
+        highlight={{
+          phrase: "the mitochondria is the powerhouse",
+          context: "Cell biology chapter.",
+        }}
       />
     ));
     expect(screen.getByText("Selected passage")).toBeInTheDocument();
-    expect(screen.getByText("the mitochondria is the powerhouse")).toBeInTheDocument();
+    expect(
+      screen.getByText("the mitochondria is the powerhouse"),
+    ).toBeInTheDocument();
   });
 
   it("does not show highlight banner when highlight is null", () => {
     render(() => (
-      <ChatModal onClose={noopClose} onManifestChanged={noopChanged} highlight={null} />
+      <ChatModal
+        onClose={noopClose}
+        onManifestChanged={noopChanged}
+        highlight={null}
+      />
     ));
     expect(screen.queryByText("Selected passage")).not.toBeInTheDocument();
   });
@@ -162,16 +192,22 @@ describe("ChatModal", () => {
       <ChatModal
         onClose={noopClose}
         onManifestChanged={noopChanged}
-        highlight={{ phrase: "some highlighted text", context: "paragraph context" }}
+        highlight={{
+          phrase: "some highlighted text",
+          context: "paragraph context",
+        }}
       />
     ));
     const input = screen.getByPlaceholderText(/message/i);
     fireEvent.input(input, { target: { value: "What does this mean?" } });
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
     await waitFor(() => {
-      expect(mockInvoke).toHaveBeenCalledWith("chat_about_book", expect.objectContaining({
-        highlight: "some highlighted text",
-      }));
+      expect(mockInvoke).toHaveBeenCalledWith(
+        "chat_about_book",
+        expect.objectContaining({
+          highlight: "some highlighted text",
+        }),
+      );
     });
   });
 
@@ -182,15 +218,19 @@ describe("ChatModal", () => {
     fireEvent.input(input, { target: { value: "hello" } });
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
     await waitFor(() => {
-      expect(mockInvoke).toHaveBeenCalledWith("chat_about_book", expect.objectContaining({
-        highlight: null,
-      }));
+      expect(mockInvoke).toHaveBeenCalledWith(
+        "chat_about_book",
+        expect.objectContaining({
+          highlight: null,
+        }),
+      );
     });
   });
 
   it("strips the json patch block from the displayed message", async () => {
     mockInvoke.mockResolvedValue({
-      reply: "I suggest this change.\n```json\n{\"action\":\"rename_chapter\",\"id\":\"ch-01\",\"title\":\"New\"}\n```\nLet me know!",
+      reply:
+        'I suggest this change.\n```json\n{"action":"rename_chapter","id":"ch-01","title":"New"}\n```\nLet me know!',
       patch: { action: "rename_chapter", id: "ch-01", title: "New" },
     });
     renderModal();

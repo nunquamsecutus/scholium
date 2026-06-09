@@ -1,4 +1,14 @@
-import { createSignal, createEffect, createMemo, For, Match, onCleanup, onMount, Show, Switch } from "solid-js";
+import {
+  createSignal,
+  createEffect,
+  createMemo,
+  For,
+  Match,
+  onCleanup,
+  onMount,
+  Show,
+  Switch,
+} from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { Chapter, Manifest } from "../types/manifest";
@@ -69,16 +79,33 @@ interface Props {
   onOpenChat?: (phrase: string, context: string) => void;
 }
 
-const BLOCK_TAGS = new Set(["P", "LI", "BLOCKQUOTE", "H1", "H2", "H3", "H4", "H5", "H6"]);
+const BLOCK_TAGS = new Set([
+  "P",
+  "LI",
+  "BLOCKQUOTE",
+  "H1",
+  "H2",
+  "H3",
+  "H4",
+  "H5",
+  "H6",
+]);
 
 // Returns the text of the closest block-level ancestor (paragraph, list item,
 // heading, blockquote) of `range`'s start, truncated to `max` characters.
 // Falls back to the container's text if no block ancestor is found. Used to
 // give the LLM enough surrounding context to pick the right sense of a word.
-export function paragraphContext(range: Range, container: HTMLElement, max = 1000): string {
+export function paragraphContext(
+  range: Range,
+  container: HTMLElement,
+  max = 1000,
+): string {
   let node: Node | null = range.startContainer;
   while (node && node !== container) {
-    if (node.nodeType === Node.ELEMENT_NODE && BLOCK_TAGS.has((node as HTMLElement).tagName)) {
+    if (
+      node.nodeType === Node.ELEMENT_NODE &&
+      BLOCK_TAGS.has((node as HTMLElement).tagName)
+    ) {
       const text = (node as HTMLElement).textContent ?? "";
       return text.length > max ? text.slice(0, max) : text;
     }
@@ -90,12 +117,20 @@ export function paragraphContext(range: Range, container: HTMLElement, max = 100
 export default function BookView(props: Props) {
   const [manifest, setManifest] = createSignal(props.manifest);
   const [selectedId, setSelectedId] = createSignal<string | null>(null);
-  const [contentCache, setContentCache] = createSignal<Record<string, string>>({});
-  const [chapterNotes, setChapterNotes] = createSignal<Record<string, NoteFromBackend[]>>({});
+  const [contentCache, setContentCache] = createSignal<Record<string, string>>(
+    {},
+  );
+  const [chapterNotes, setChapterNotes] = createSignal<
+    Record<string, NoteFromBackend[]>
+  >({});
   const [notePages, setNotePages] = createSignal<Record<number, number>>({});
-  const [activeFootnote, setActiveFootnote] = createSignal<NoteFromBackend | null>(null);
-  const [endnoteReturnPage, setEndnoteReturnPage] = createSignal<number | null>(null);
-  const [rewriteDialog, setRewriteDialog] = createSignal<RewriteDialogState | null>(null);
+  const [activeFootnote, setActiveFootnote] =
+    createSignal<NoteFromBackend | null>(null);
+  const [endnoteReturnPage, setEndnoteReturnPage] = createSignal<number | null>(
+    null,
+  );
+  const [rewriteDialog, setRewriteDialog] =
+    createSignal<RewriteDialogState | null>(null);
   const [dialogInput, setDialogInput] = createSignal("");
   // Message shown in the floating busy pill while a highlight-driven LLM
   // action is in flight; null when idle.
@@ -115,10 +150,14 @@ export default function BookView(props: Props) {
     id: number;
     rect: { top: number; left: number; width: number; height: number };
   } | null>(null);
-  const [confirmingArtifactDelete, setConfirmingArtifactDelete] = createSignal(false);
+  const [confirmingArtifactDelete, setConfirmingArtifactDelete] =
+    createSignal(false);
   // Edit-image modal: the artifact id + surrounding context, the instruction
   // text, and whether the regenerate request is in flight.
-  const [editArtifact, setEditArtifact] = createSignal<{ id: number; context: string } | null>(null);
+  const [editArtifact, setEditArtifact] = createSignal<{
+    id: number;
+    context: string;
+  } | null>(null);
   const [editInstruction, setEditInstruction] = createSignal("");
   const [editSending, setEditSending] = createSignal(false);
   // Zoom lightbox: holds the extracted SVG markup and caption while the
@@ -137,14 +176,15 @@ export default function BookView(props: Props) {
     manifest().lessonPlan.chapters.find((ch) => ch.id === selectedId()) ?? null;
 
   const nextPlannedId = () =>
-    manifest().lessonPlan.chapters.find((ch) => ch.status === "planned")?.id ?? null;
+    manifest().lessonPlan.chapters.find((ch) => ch.status === "planned")?.id ??
+    null;
 
   const currentHtml = () =>
-    selectedId() ? contentCache()[selectedId()!] ?? null : null;
+    selectedId() ? (contentCache()[selectedId()!] ?? null) : null;
 
   const currentNotes = () => {
     const id = selectedId();
-    return id ? chapterNotes()[id] ?? [] : [];
+    return id ? (chapterNotes()[id] ?? []) : [];
   };
 
   const visibleMarginalia = createMemo(() => {
@@ -183,7 +223,9 @@ export default function BookView(props: Props) {
     const notes = currentNotes();
     const pages: Record<number, number> = {};
     for (const n of notes) {
-      const sup = article.querySelector(`[data-note-id="${n.id}"]`) as HTMLElement | null;
+      const sup = article.querySelector(
+        `[data-note-id="${n.id}"]`,
+      ) as HTMLElement | null;
       if (sup) pages[n.id] = pageOfElement(sup);
     }
     setNotePages(pages);
@@ -271,10 +313,12 @@ export default function BookView(props: Props) {
 
   // Live image-generation progress streamed from the backend.
   onMount(() => {
-    const unlisten = listen<{ phase: string; pass: number; max: number; svg: string }>(
-      "image-progress",
-      (e) => setImageProgress(e.payload),
-    );
+    const unlisten = listen<{
+      phase: string;
+      pass: number;
+      max: number;
+      svg: string;
+    }>("image-progress", (e) => setImageProgress(e.payload));
     onCleanup(() => {
       unlisten.then((un) => un());
     });
@@ -324,7 +368,12 @@ export default function BookView(props: Props) {
         const rect = figure.getBoundingClientRect();
         setActiveArtifact({
           id,
-          rect: { top: rect.top, left: rect.left, width: rect.width, height: rect.height },
+          rect: {
+            top: rect.top,
+            left: rect.left,
+            width: rect.width,
+            height: rect.height,
+          },
         });
         setConfirmingArtifactDelete(false);
         return;
@@ -337,7 +386,9 @@ export default function BookView(props: Props) {
         e.preventDefault();
         const seq = appRef.dataset.appendixSeq;
         if (seq) {
-          const ch = manifest().lessonPlan.chapters.find((c) => c.id === `ap-${seq}`);
+          const ch = manifest().lessonPlan.chapters.find(
+            (c) => c.id === `ap-${seq}`,
+          );
           if (ch) selectChapter(ch);
         }
         return;
@@ -437,7 +488,9 @@ export default function BookView(props: Props) {
 
     if (ch.status === "generated" && !contentCache()[ch.id]) {
       try {
-        const result = await invoke<ChapterContent>("read_chapter", { chapterId: ch.id });
+        const result = await invoke<ChapterContent>("read_chapter", {
+          chapterId: ch.id,
+        });
         setContentCache((c) => ({ ...c, [ch.id]: result.html }));
         setChapterNotes((m) => ({ ...m, [ch.id]: result.notes }));
       } catch (e) {
@@ -461,7 +514,9 @@ export default function BookView(props: Props) {
     }));
 
     try {
-      const result = await invoke<GenerateResult>("generate_chapter", { chapterId });
+      const result = await invoke<GenerateResult>("generate_chapter", {
+        chapterId,
+      });
       setManifest(result.manifest);
       setContentCache((c) => ({ ...c, [chapterId]: result.html }));
       setChapterNotes((m) => ({ ...m, [chapterId]: [] }));
@@ -748,7 +803,11 @@ export default function BookView(props: Props) {
       </aside>
 
       <main class="book-content">
-        {error() && <p class="field-error book-error" role="alert">{error()}</p>}
+        {error() && (
+          <p class="field-error book-error" role="alert">
+            {error()}
+          </p>
+        )}
 
         <Switch>
           <Match when={!selectedChapter()}>
@@ -772,7 +831,10 @@ export default function BookView(props: Props) {
           </Match>
 
           <Match when={selectedChapter()?.status === "generated"}>
-            <Show when={currentHtml()} fallback={<div class="chapter-loading">Loading…</div>}>
+            <Show
+              when={currentHtml()}
+              fallback={<div class="chapter-loading">Loading…</div>}
+            >
               <div class="reader">
                 <div class="reader-spread">
                   <div class="page-window">
@@ -858,9 +920,7 @@ export default function BookView(props: Props) {
             aria-live="polite"
           >
             <Show when={imageProgress()?.svg}>
-              {(svg) => (
-                <div class="busy-preview" innerHTML={svg()} />
-              )}
+              {(svg) => <div class="busy-preview" innerHTML={svg()} />}
             </Show>
             <div class="busy-pill-row">
               <BookLoader />
@@ -870,7 +930,12 @@ export default function BookView(props: Props) {
                   {(p) => {
                     if (p().phase === "composition") return <> (Composing…)</>;
                     if (p().phase === "critique") return <> (Critiquing…)</>;
-                    return <> (Pass {p().pass}/{p().max})</>;
+                    return (
+                      <>
+                        {" "}
+                        (Pass {p().pass}/{p().max})
+                      </>
+                    );
                   }}
                 </Show>
               </span>
@@ -898,11 +963,19 @@ export default function BookView(props: Props) {
                       aria-label="Zoom in"
                       onClick={() => handleZoomArtifact(a().id)}
                     >
-                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                        <circle cx="11" cy="11" r="8"/>
-                        <path d="m21 21-4.35-4.35"/>
-                        <line x1="11" y1="8" x2="11" y2="14"/>
-                        <line x1="8" y1="11" x2="14" y2="11"/>
+                      <svg
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="2"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        aria-hidden="true"
+                      >
+                        <circle cx="11" cy="11" r="8" />
+                        <path d="m21 21-4.35-4.35" />
+                        <line x1="11" y1="8" x2="11" y2="14" />
+                        <line x1="8" y1="11" x2="14" y2="11" />
                       </svg>
                     </button>
                     <button
@@ -911,7 +984,15 @@ export default function BookView(props: Props) {
                       aria-label="Edit image"
                       onClick={() => openEditArtifact(a().id)}
                     >
-                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                      <svg
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="2"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        aria-hidden="true"
+                      >
                         <path d="M4 20h4L18.5 9.5l-4-4L4 16z" />
                         <path d="M13.5 6.5l4 4" />
                       </svg>
@@ -922,7 +1003,15 @@ export default function BookView(props: Props) {
                       aria-label="Delete image"
                       onClick={() => setConfirmingArtifactDelete(true)}
                     >
-                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                      <svg
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="2"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        aria-hidden="true"
+                      >
                         <path d="M3 6h18" />
                         <path d="M8 6V4h8v2" />
                         <path d="M6 6l1 14h10l1-14" />
@@ -1030,7 +1119,9 @@ export default function BookView(props: Props) {
                 </button>
                 <div class="artifact-zoom-svg" innerHTML={z().svgHtml} />
                 <Show when={z().caption}>
-                  <figcaption class="artifact-zoom-caption">{z().caption}</figcaption>
+                  <figcaption class="artifact-zoom-caption">
+                    {z().caption}
+                  </figcaption>
                 </Show>
               </div>
             </div>
@@ -1052,7 +1143,9 @@ export default function BookView(props: Props) {
               onClick={(e) => e.stopPropagation()}
             >
               <div class="rewrite-dialog-header">
-                <span class="rewrite-dialog-title">I still don't understand</span>
+                <span class="rewrite-dialog-title">
+                  I still don't understand
+                </span>
                 <button
                   type="button"
                   class="rewrite-dialog-close"
@@ -1065,12 +1158,16 @@ export default function BookView(props: Props) {
               </div>
               <div class="rewrite-dialog-passage">
                 <div class="rewrite-dialog-passage-label">The passage</div>
-                <div class="rewrite-dialog-passage-text">{rewriteDialog()!.passage}</div>
+                <div class="rewrite-dialog-passage-text">
+                  {rewriteDialog()!.passage}
+                </div>
               </div>
               <div class="rewrite-dialog-conversation">
                 <For each={rewriteDialog()!.messages}>
                   {(m) => (
-                    <div class={`rewrite-dialog-message rewrite-dialog-message--${m.role}`}>
+                    <div
+                      class={`rewrite-dialog-message rewrite-dialog-message--${m.role}`}
+                    >
                       {m.content}
                     </div>
                   )}
@@ -1107,7 +1204,10 @@ export default function BookView(props: Props) {
                 <button
                   type="button"
                   class="rewrite-dialog-understand"
-                  disabled={rewriteDialog()!.sending || rewriteDialog()!.messages.length === 0}
+                  disabled={
+                    rewriteDialog()!.sending ||
+                    rewriteDialog()!.messages.length === 0
+                  }
                   onClick={applyUnderstandingRewrite}
                 >
                   I understand now
@@ -1130,7 +1230,9 @@ export default function BookView(props: Props) {
               onClick={(e) => e.stopPropagation()}
             >
               <div class="footnote-sheet-header">
-                <span class="footnote-sheet-title">Footnote {activeFootnote()!.id}</span>
+                <span class="footnote-sheet-title">
+                  Footnote {activeFootnote()!.id}
+                </span>
                 <button
                   type="button"
                   class="footnote-sheet-close"
@@ -1157,7 +1259,9 @@ function BookOverview(props: { manifest: Manifest }) {
         <p class="overview-subtitle">{props.manifest.metadata.subtitle}</p>
       </Show>
       <Show when={props.manifest.metadata.description}>
-        <p class="overview-description">{props.manifest.metadata.description}</p>
+        <p class="overview-description">
+          {props.manifest.metadata.description}
+        </p>
       </Show>
     </div>
   );
@@ -1181,7 +1285,11 @@ function ChapterPlaceholder(props: {
           </p>
         }
       >
-        <button class="btn-primary" disabled={props.generating} onClick={props.onGenerate}>
+        <button
+          class="btn-primary"
+          disabled={props.generating}
+          onClick={props.onGenerate}
+        >
           {props.generating ? "Generating…" : "Generate Chapter"}
         </button>
       </Show>

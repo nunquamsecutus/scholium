@@ -26,7 +26,8 @@ export default function SettingsModal(props: Props) {
   const [ollamaUrl, setOllamaUrl] = createSignal("");
   const [ollamaModel, setOllamaModel] = createSignal("");
   const [imageProvider, setImageProvider] = createSignal<Provider>("ollama");
-  const [claudeImageModel, setClaudeImageModel] = createSignal("claude-sonnet-4-6");
+  const [claudeImageModel, setClaudeImageModel] =
+    createSignal("claude-sonnet-4-6");
   const [ollamaImageModel, setOllamaImageModel] = createSignal("llama3.2");
   const [imageQuality, setImageQuality] = createSignal<ImageQuality>("medium");
   const [saving, setSaving] = createSignal(false);
@@ -93,7 +94,11 @@ export default function SettingsModal(props: Props) {
   }
 
   return (
-    <div class="settings-backdrop" role="presentation" onClick={() => props.onClose()}>
+    <div
+      class="settings-backdrop"
+      role="presentation"
+      onClick={() => props.onClose()}
+    >
       <div
         class="settings-modal"
         role="dialog"
@@ -113,7 +118,11 @@ export default function SettingsModal(props: Props) {
         </div>
 
         <div class="settings-body">
-          {error() && <p class="field-error" role="alert">{error()}</p>}
+          {error() && (
+            <p class="field-error" role="alert">
+              {error()}
+            </p>
+          )}
 
           <label class="settings-field">
             <span class="settings-label">LLM provider</span>
@@ -138,7 +147,11 @@ export default function SettingsModal(props: Props) {
               <input
                 type="password"
                 autocomplete="off"
-                placeholder={claudeConfigured() ? "•••••••• (leave blank to keep)" : "sk-ant-…"}
+                placeholder={
+                  claudeConfigured()
+                    ? "•••••••• (leave blank to keep)"
+                    : "sk-ant-…"
+                }
                 value={claudeKey()}
                 onInput={(e) => setClaudeKey(e.currentTarget.value)}
               />
@@ -181,7 +194,9 @@ export default function SettingsModal(props: Props) {
               <span class="settings-label">Provider</span>
               <select
                 value={imageProvider()}
-                onChange={(e) => setImageProvider(e.currentTarget.value as Provider)}
+                onChange={(e) =>
+                  setImageProvider(e.currentTarget.value as Provider)
+                }
               >
                 <option value="claude">Claude</option>
                 <option value="ollama">Ollama</option>
@@ -214,7 +229,9 @@ export default function SettingsModal(props: Props) {
             <span class="settings-label">Image quality</span>
             <select
               value={imageQuality()}
-              onChange={(e) => setImageQuality(e.currentTarget.value as ImageQuality)}
+              onChange={(e) =>
+                setImageQuality(e.currentTarget.value as ImageQuality)
+              }
             >
               <option value="fast">Fast</option>
               <option value="medium">Medium</option>
@@ -232,7 +249,12 @@ export default function SettingsModal(props: Props) {
           >
             Cancel
           </button>
-          <button type="button" class="btn-primary" onClick={save} disabled={saving()}>
+          <button
+            type="button"
+            class="btn-primary"
+            onClick={save}
+            disabled={saving()}
+          >
             {saving() ? "Saving…" : "Save"}
           </button>
         </div>

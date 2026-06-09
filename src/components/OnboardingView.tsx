@@ -2,11 +2,20 @@ import { createSignal, For, Show } from "solid-js";
 import { save } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import type { Manifest } from "../types/manifest";
-import type { ChatMessage, GeneratedPlan, ReadingLevel } from "../types/onboarding";
+import type {
+  ChatMessage,
+  GeneratedPlan,
+  ReadingLevel,
+} from "../types/onboarding";
 
 const READY_SIGNAL = "Ready to generate your lesson plan.";
 
-const READING_LEVELS: { id: ReadingLevel; label: string; sublabel: string; sample: string }[] = [
+const READING_LEVELS: {
+  id: ReadingLevel;
+  label: string;
+  sublabel: string;
+  sample: string;
+}[] = [
   {
     id: "child",
     label: "Child",
@@ -44,7 +53,9 @@ interface Props {
 }
 
 export default function OnboardingView(props: Props) {
-  const [readingLevel, setReadingLevel] = createSignal<ReadingLevel | null>(null);
+  const [readingLevel, setReadingLevel] = createSignal<ReadingLevel | null>(
+    null,
+  );
   const [messages, setMessages] = createSignal<ChatMessage[]>([]);
   const [input, setInput] = createSignal("");
   const [loading, setLoading] = createSignal(false);
@@ -61,14 +72,18 @@ export default function OnboardingView(props: Props) {
   };
 
   const llmSignaledReady = () => lastAssistantMessage().includes(READY_SIGNAL);
-  const canGeneratePlan = () => messages().some((m) => m.role === "assistant") && !loading();
+  const canGeneratePlan = () =>
+    messages().some((m) => m.role === "assistant") && !loading();
 
   async function handleLevelSelect(level: ReadingLevel) {
     setReadingLevel(level);
     setLoading(true);
     setError("");
     try {
-      const response = await invoke<string>("begin_onboarding", { topic: props.topic, readingLevel: level });
+      const response = await invoke<string>("begin_onboarding", {
+        topic: props.topic,
+        readingLevel: level,
+      });
       setMessages([{ role: "assistant", content: response }]);
     } catch (e) {
       setError(String(e));
@@ -83,7 +98,10 @@ export default function OnboardingView(props: Props) {
     setInput("");
     setError("");
 
-    const updated: ChatMessage[] = [...messages(), { role: "user", content: text }];
+    const updated: ChatMessage[] = [
+      ...messages(),
+      { role: "user", content: text },
+    ];
     setMessages(updated);
     setLoading(true);
 
@@ -147,7 +165,11 @@ export default function OnboardingView(props: Props) {
   return (
     <div class="onboarding-shell">
       <header class="onboarding-header">
-        <button class="btn-back" onClick={props.onBack} disabled={loading() || saving()}>
+        <button
+          class="btn-back"
+          onClick={props.onBack}
+          disabled={loading() || saving()}
+        >
           ← Back
         </button>
         <div class="onboarding-topic">
@@ -156,8 +178,20 @@ export default function OnboardingView(props: Props) {
         </div>
       </header>
 
-      <Show when={readingLevel() !== null} fallback={<ReadingLevelSelector onSelect={handleLevelSelect} />}>
-        <Show when={!plan()} fallback={<PlanPreview plan={plan()!} onSave={handleSaveBook} saving={saving()} />}>
+      <Show
+        when={readingLevel() !== null}
+        fallback={<ReadingLevelSelector onSelect={handleLevelSelect} />}
+      >
+        <Show
+          when={!plan()}
+          fallback={
+            <PlanPreview
+              plan={plan()!}
+              onSave={handleSaveBook}
+              saving={saving()}
+            />
+          }
+        >
           <div class="chat-area">
             <div class="chat-messages" id="chat-messages">
               <Show when={messages().length === 0 && loading()}>
@@ -172,12 +206,18 @@ export default function OnboardingView(props: Props) {
               </For>
               <Show when={loading() && messages().length > 0}>
                 <div class="chat-bubble chat-bubble--assistant chat-bubble--thinking">
-                  <span class="thinking-dot" /><span class="thinking-dot" /><span class="thinking-dot" />
+                  <span class="thinking-dot" />
+                  <span class="thinking-dot" />
+                  <span class="thinking-dot" />
                 </div>
               </Show>
             </div>
 
-            {error() && <p class="field-error" role="alert">{error()}</p>}
+            {error() && (
+              <p class="field-error" role="alert">
+                {error()}
+              </p>
+            )}
 
             <div class="chat-input-row">
               <textarea
@@ -187,14 +227,21 @@ export default function OnboardingView(props: Props) {
                 value={input()}
                 onInput={(e) => setInput(e.currentTarget.value)}
                 onKeyDown={(e) => {
-                  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void sendMessage(); }
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    void sendMessage();
+                  }
                 }}
                 disabled={loading() || messages().length === 0}
               />
               <button
                 class="btn-send"
                 onClick={sendMessage}
-                disabled={input().trim().length === 0 || loading() || messages().length === 0}
+                disabled={
+                  input().trim().length === 0 ||
+                  loading() ||
+                  messages().length === 0
+                }
               >
                 Send
               </button>
@@ -206,7 +253,9 @@ export default function OnboardingView(props: Props) {
                 disabled={!canGeneratePlan()}
                 onClick={handleGeneratePlan}
               >
-                {llmSignaledReady() ? "Generate Lesson Plan ✓" : "Generate Lesson Plan"}
+                {llmSignaledReady()
+                  ? "Generate Lesson Plan ✓"
+                  : "Generate Lesson Plan"}
               </button>
             </div>
           </div>
@@ -216,7 +265,9 @@ export default function OnboardingView(props: Props) {
   );
 }
 
-function ReadingLevelSelector(props: { onSelect: (level: ReadingLevel) => void }) {
+function ReadingLevelSelector(props: {
+  onSelect: (level: ReadingLevel) => void;
+}) {
   const [selected, setSelected] = createSignal<ReadingLevel | null>(null);
 
   return (
@@ -266,7 +317,8 @@ function PlanPreview(props: PlanPreviewProps) {
       <h2 class="plan-preview-title">Your Lesson Plan</h2>
       <p class="plan-description">{props.plan.description}</p>
       <dl class="plan-meta">
-        <dt>Background</dt><dd>{props.plan.priorKnowledge}</dd>
+        <dt>Background</dt>
+        <dd>{props.plan.priorKnowledge}</dd>
       </dl>
       <ol class="plan-chapters">
         <For each={props.plan.lessonPlan.chapters}>
@@ -280,7 +332,11 @@ function PlanPreview(props: PlanPreviewProps) {
           )}
         </For>
       </ol>
-      <button class="btn-primary" onClick={props.onSave} disabled={props.saving}>
+      <button
+        class="btn-primary"
+        onClick={props.onSave}
+        disabled={props.saving}
+      >
         {props.saving ? "Saving…" : "Save Book"}
       </button>
     </div>

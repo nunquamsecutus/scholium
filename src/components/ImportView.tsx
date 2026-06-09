@@ -82,7 +82,9 @@ export default function ImportView(props: Props) {
                 onDrop={() => onDrop(i())}
                 onDragEnd={() => setDragIndex(null)}
               >
-                <span class="import-grip" aria-hidden="true">⠿</span>
+                <span class="import-grip" aria-hidden="true">
+                  ⠿
+                </span>
                 <span class="import-position">{i() + 1}.</span>
                 <span class="import-filename">{file}</span>
               </li>
@@ -91,7 +93,9 @@ export default function ImportView(props: Props) {
         </ol>
 
         <Show when={error()}>
-          <p class="field-error" role="alert">{error()}</p>
+          <p class="field-error" role="alert">
+            {error()}
+          </p>
         </Show>
 
         <footer class="import-footer">

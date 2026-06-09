@@ -1,5 +1,9 @@
 import { createSignal, onCleanup, onMount, Show } from "solid-js";
-import { selectedSingleWord, selectedPhrase, selectionTouchesRewrite } from "../lib/selection";
+import {
+  selectedSingleWord,
+  selectedPhrase,
+  selectionTouchesRewrite,
+} from "../lib/selection";
 
 interface Props {
   container: () => HTMLElement | undefined;
@@ -23,7 +27,9 @@ export default function SelectionToolbar(props: Props) {
   const [range, setRange] = createSignal<Range | null>(null);
   const [pos, setPos] = createSignal({ top: 0, left: 0 });
   const [mode, setMode] = createSignal<Mode>("primary");
-  const [touchedRewriteId, setTouchedRewriteId] = createSignal<number | null>(null);
+  const [touchedRewriteId, setTouchedRewriteId] = createSignal<number | null>(
+    null,
+  );
 
   function clear() {
     setWord(null);
@@ -34,7 +40,10 @@ export default function SelectionToolbar(props: Props) {
   }
 
   // Find the first rewrite span the range intersects, returning its id.
-  function findTouchedRewriteId(r: Range, container: HTMLElement): number | null {
+  function findTouchedRewriteId(
+    r: Range,
+    container: HTMLElement,
+  ): number | null {
     const spans = container.querySelectorAll("[data-rewrite-id]");
     for (const span of Array.from(spans)) {
       if (r.intersectsNode(span)) {
@@ -63,16 +72,19 @@ export default function SelectionToolbar(props: Props) {
       clear();
       return;
     }
-    const rect = typeof r.getBoundingClientRect === "function"
-      ? r.getBoundingClientRect()
-      : null;
+    const rect =
+      typeof r.getBoundingClientRect === "function"
+        ? r.getBoundingClientRect()
+        : null;
     if (rect) setPos({ top: rect.top, left: rect.left + rect.width / 2 });
     setRange(r.cloneRange());
     setWord(w);
     setPhrase(p);
     setMode("primary");
     setTouchedRewriteId(
-      p && selectionTouchesRewrite(r, containerEl) ? findTouchedRewriteId(r, containerEl) : null,
+      p && selectionTouchesRewrite(r, containerEl)
+        ? findTouchedRewriteId(r, containerEl)
+        : null,
     );
   }
 
@@ -169,7 +181,11 @@ export default function SelectionToolbar(props: Props) {
               Define
             </button>
             <Show when={props.onReadFromHere}>
-              <button type="button" class="selection-action" onClick={readFromHere}>
+              <button
+                type="button"
+                class="selection-action"
+                onClick={readFromHere}
+              >
                 Read from here
               </button>
             </Show>
@@ -183,12 +199,22 @@ export default function SelectionToolbar(props: Props) {
               Tell me more
             </button>
             <button type="button" class="selection-action" onClick={rewrite}>
-              {touchedRewriteId() !== null ? "I still don't understand" : "I don't understand"}
+              {touchedRewriteId() !== null
+                ? "I still don't understand"
+                : "I don't understand"}
             </button>
-            <button type="button" class="selection-action" onClick={drawPicture}>
+            <button
+              type="button"
+              class="selection-action"
+              onClick={drawPicture}
+            >
               Draw a picture
             </button>
-            <button type="button" class="selection-action" onClick={drawDiagram}>
+            <button
+              type="button"
+              class="selection-action"
+              onClick={drawDiagram}
+            >
               Diagram
             </button>
             <Show when={props.onChat}>

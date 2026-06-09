@@ -1,4 +1,11 @@
-import { createSignal, Match, onCleanup, onMount, Show, Switch } from "solid-js";
+import {
+  createSignal,
+  Match,
+  onCleanup,
+  onMount,
+  Show,
+  Switch,
+} from "solid-js";
 import { listen } from "@tauri-apps/api/event";
 import WelcomeModal from "./components/WelcomeModal";
 import OnboardingView from "./components/OnboardingView";
@@ -28,7 +35,9 @@ function App() {
 
   onMount(() => {
     // The native "Settings…" menu item emits this event.
-    const unlistenSettings = listen("open-settings", () => setSettingsOpen(true));
+    const unlistenSettings = listen("open-settings", () =>
+      setSettingsOpen(true),
+    );
     // The native "Chat…" menu item (⌘K) emits this event (no selection context).
     const unlistenChat = listen("open-chat", () => {
       setChatHighlight(null);
@@ -69,7 +78,9 @@ function App() {
           <WelcomeModal
             onTopic={(topic) => setStage({ name: "onboarding", topic })}
             onBook={(manifest) => setStage({ name: "book", manifest })}
-            onImport={(directory, files) => setStage({ name: "import", directory, files })}
+            onImport={(directory, files) =>
+              setStage({ name: "import", directory, files })
+            }
           />
         </Match>
         <Match when={stage().name === "onboarding"}>
@@ -81,15 +92,33 @@ function App() {
         </Match>
         <Match when={stage().name === "import"}>
           <ImportView
-            directory={(stage() as { name: "import"; directory: string; files: string[] }).directory}
-            files={(stage() as { name: "import"; directory: string; files: string[] }).files}
+            directory={
+              (
+                stage() as {
+                  name: "import";
+                  directory: string;
+                  files: string[];
+                }
+              ).directory
+            }
+            files={
+              (
+                stage() as {
+                  name: "import";
+                  directory: string;
+                  files: string[];
+                }
+              ).files
+            }
             onCancel={() => setStage({ name: "welcome" })}
             onImported={(manifest) => setStage({ name: "book", manifest })}
           />
         </Match>
         <Match when={stage().name === "book"}>
           <BookView
-            manifest={(stage() as { name: "book"; manifest: Manifest }).manifest}
+            manifest={
+              (stage() as { name: "book"; manifest: Manifest }).manifest
+            }
             onOpenChat={handleOpenChat}
           />
         </Match>

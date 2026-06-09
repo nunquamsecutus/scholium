@@ -1,5 +1,9 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { selectedSingleWord, selectedPhrase, selectionTouchesRewrite } from "./selection";
+import {
+  selectedSingleWord,
+  selectedPhrase,
+  selectionTouchesRewrite,
+} from "./selection";
 
 function selectRange(text: string, start: number, end: number): Selection {
   document.body.innerHTML = "";
@@ -31,11 +35,15 @@ describe("selectedSingleWord", () => {
   });
 
   it("expands a partial selection to the full word", () => {
-    expect(selectedSingleWord(selectRange("blackhole", 1, 4))).toBe("blackhole");
+    expect(selectedSingleWord(selectRange("blackhole", 1, 4))).toBe(
+      "blackhole",
+    );
   });
 
   it("trims surrounding whitespace from the selection", () => {
-    expect(selectedSingleWord(selectRange("  hello  world", 0, 7))).toBe("hello");
+    expect(selectedSingleWord(selectRange("  hello  world", 0, 7))).toBe(
+      "hello",
+    );
   });
 
   it("returns null when the selection spans multiple words", () => {
@@ -55,7 +63,9 @@ describe("selectedSingleWord", () => {
   });
 
   it("includes hyphens in word boundaries", () => {
-    expect(selectedSingleWord(selectRange("well-known author", 0, 4))).toBe("well-known");
+    expect(selectedSingleWord(selectRange("well-known author", 0, 4))).toBe(
+      "well-known",
+    );
   });
 
   it("includes apostrophes in word boundaries", () => {
@@ -92,7 +102,9 @@ describe("selectedPhrase", () => {
   });
 
   it("returns the trimmed phrase for a multi-word selection", () => {
-    expect(selectedPhrase(selectRange("hello world here", 0, 11))).toBe("hello world");
+    expect(selectedPhrase(selectRange("hello world here", 0, 11))).toBe(
+      "hello world",
+    );
   });
 
   it("returns null for null selection", () => {
@@ -108,7 +120,9 @@ describe("selectedPhrase", () => {
   });
 
   it("trims leading and trailing whitespace from the phrase", () => {
-    expect(selectedPhrase(selectRange("  hello world  ", 0, 15))).toBe("hello world");
+    expect(selectedPhrase(selectRange("  hello world  ", 0, 15))).toBe(
+      "hello world",
+    );
   });
 });
 

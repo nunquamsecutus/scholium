@@ -1,0 +1,11 @@
+pre-push:
+  parallel: true
+  commands:
+    typecheck:
+      run: npm run typecheck
+    lint-ts:
+      run: npm run lint:ts
+    lint-fmt:
+      run: npm run lint:fmt
+    lint-rs:
+      run: npm run lint:rs

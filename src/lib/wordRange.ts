@@ -7,12 +7,14 @@ const WORD_CHAR = /[\p{L}\p{N}'\-]/u;
  */
 export function expandRangeToWord(range: Range): Range | null {
   const node = range.startContainer;
-  if (node.nodeType !== Node.TEXT_NODE || range.endContainer !== node) return null;
+  if (node.nodeType !== Node.TEXT_NODE || range.endContainer !== node)
+    return null;
 
   const full = node.textContent ?? "";
 
   let anchor = range.startOffset;
-  while (anchor < range.endOffset && !WORD_CHAR.test(full[anchor] ?? "")) anchor++;
+  while (anchor < range.endOffset && !WORD_CHAR.test(full[anchor] ?? ""))
+    anchor++;
   if (anchor >= full.length || !WORD_CHAR.test(full[anchor] ?? "")) return null;
 
   let start = anchor;

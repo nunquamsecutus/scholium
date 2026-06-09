@@ -857,7 +857,7 @@ async fn add_footnote(
     let topic = Some(book.metadata.topic.as_str()).filter(|s| !s.is_empty());
 
     let settings = state.settings.lock().unwrap().clone();
-    let messages = expand::build_footnote_messages(&selection, &context, reading_level, topic);
+    let messages = expand::build_footnote_messages(selection, &context, reading_level, topic);
     let raw = dispatch_llm(&settings, messages).await?;
     let body = expand::clean_footnote_response(&raw);
     if body.is_empty() {
@@ -908,7 +908,7 @@ async fn add_endnote(
     let topic = Some(book.metadata.topic.as_str()).filter(|s| !s.is_empty());
 
     let settings = state.settings.lock().unwrap().clone();
-    let messages = expand::build_endnote_messages(&selection, &context, reading_level, topic);
+    let messages = expand::build_endnote_messages(selection, &context, reading_level, topic);
     let raw = dispatch_llm(&settings, messages).await?;
     let body = expand::clean_endnote_response(&raw);
     if body.is_empty() {
@@ -1175,7 +1175,7 @@ async fn rewrite_passage(
     let topic = Some(book.metadata.topic.as_str()).filter(|s| !s.is_empty());
 
     let settings = state.settings.lock().unwrap().clone();
-    let messages = rewrite::build_rewrite_messages(&selection, &context, reading_level, topic);
+    let messages = rewrite::build_rewrite_messages(selection, &context, reading_level, topic);
     let raw_llm = dispatch_llm(&settings, messages).await?;
     let replacement = rewrite::clean_rewrite_response(&raw_llm);
     if replacement.is_empty() {
@@ -1335,7 +1335,7 @@ async fn add_appendix(
     let settings = state.settings.lock().unwrap().clone();
     let topic_ref = Some(topic.as_str()).filter(|s| !s.is_empty());
     let messages =
-        expand::build_appendix_messages(&selection, &context, &reading_level, topic_ref);
+        expand::build_appendix_messages(selection, &context, &reading_level, topic_ref);
     let raw_llm = dispatch_llm(&settings, messages).await?;
     let content = expand::clean_appendix_response(&raw_llm);
     if content.is_empty() {
@@ -1343,7 +1343,7 @@ async fn add_appendix(
     }
 
     let appendix_id = format!("ap-{}", seq);
-    let appendix_title = appendix_title_from(seq, &selection);
+    let appendix_title = appendix_title_from(seq, selection);
     let appendix_file = format!("chapters/{}.edupage", appendix_id);
 
     let book_dir = book_path.parent().ok_or("invalid book path")?.to_path_buf();

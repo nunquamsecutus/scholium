@@ -74,7 +74,9 @@ export default function ChatModal(props: Props) {
   const [input, setInput] = createSignal("");
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal("");
-  const [pendingPatch, setPendingPatch] = createSignal<ManifestPatch | null>(null);
+  const [pendingPatch, setPendingPatch] = createSignal<ManifestPatch | null>(
+    null,
+  );
   const [applyError, setApplyError] = createSignal("");
 
   let threadEl: HTMLDivElement | undefined;
@@ -169,7 +171,10 @@ export default function ChatModal(props: Props) {
     setApplyError("");
     setHistory((h) => [
       ...h,
-      { role: "assistant" as const, content: "OK, the change was not applied." },
+      {
+        role: "assistant" as const,
+        content: "OK, the change was not applied.",
+      },
     ]);
   }
 
@@ -203,7 +208,9 @@ export default function ChatModal(props: Props) {
           {(hl) => (
             <div class="chat-highlight-banner">
               <span class="chat-highlight-label">Selected passage</span>
-              <blockquote class="chat-highlight-quote">{hl().phrase}</blockquote>
+              <blockquote class="chat-highlight-quote">
+                {hl().phrase}
+              </blockquote>
             </div>
           )}
         </Show>
@@ -221,9 +228,7 @@ export default function ChatModal(props: Props) {
           >
             <For each={history()}>
               {(msg) => (
-                <div
-                  class={`chat-bubble chat-bubble--${msg.role}`}
-                >
+                <div class={`chat-bubble chat-bubble--${msg.role}`}>
                   <Show
                     when={msg.role === "assistant"}
                     fallback={<p class="chat-text">{msg.content}</p>}
@@ -241,7 +246,9 @@ export default function ChatModal(props: Props) {
               <div class="chat-patch-banner">
                 <p class="chat-patch-description">{describePatch(patch())}</p>
                 <Show when={applyError()}>
-                  <p class="chat-patch-error" role="alert">{applyError()}</p>
+                  <p class="chat-patch-error" role="alert">
+                    {applyError()}
+                  </p>
                 </Show>
                 <div class="chat-patch-actions">
                   <button
@@ -275,7 +282,9 @@ export default function ChatModal(props: Props) {
 
         {/* Error */}
         <Show when={error()}>
-          <p class="chat-error" role="alert">{error()}</p>
+          <p class="chat-error" role="alert">
+            {error()}
+          </p>
         </Show>
 
         {/* Input area */}

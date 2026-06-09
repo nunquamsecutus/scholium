@@ -14,7 +14,7 @@ export async function speakText(text: string): Promise<void> {
 
   try {
     await invoke("speak_text", { text: trimmed });
-  } catch (e) {
+  } catch {
     // "platform_not_supported" is the expected signal from non-macOS builds.
     // Any other error also falls back so the user still hears something.
     if (typeof window !== "undefined" && window.speechSynthesis) {

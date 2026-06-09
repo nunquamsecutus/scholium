@@ -36,8 +36,12 @@ function utf8ByteLength(s: string): number {
  * `data-src-skip` boundary.  Returns null if none is found or if the node
  * lives inside a skip subtree.
  */
-function nearestSrcStart(node: Node, container: HTMLElement): HTMLElement | null {
-  let n: Node | null = node.nodeType === Node.TEXT_NODE ? node.parentNode : node;
+function nearestSrcStart(
+  node: Node,
+  container: HTMLElement,
+): HTMLElement | null {
+  let n: Node | null =
+    node.nodeType === Node.TEXT_NODE ? node.parentNode : node;
   while (n && n !== container) {
     const el = n as HTMLElement;
     if (el.hasAttribute?.("data-src-skip")) return null;
@@ -48,7 +52,8 @@ function nearestSrcStart(node: Node, container: HTMLElement): HTMLElement | null
 }
 
 function nearestSrcEnd(node: Node, container: HTMLElement): HTMLElement | null {
-  let n: Node | null = node.nodeType === Node.TEXT_NODE ? node.parentNode : node;
+  let n: Node | null =
+    node.nodeType === Node.TEXT_NODE ? node.parentNode : node;
   while (n && n !== container) {
     const el = n as HTMLElement;
     if (el.hasAttribute?.("data-src-skip")) return null;
@@ -82,13 +87,21 @@ export function resolveSourceRange(
   // range.startContainer is a text node inside (or equal to) startSpan.
   // We need the character offset relative to the span's full text.
   let startCharOffset: number;
-  if (range.startContainer.nodeType === Node.TEXT_NODE && startSpan.contains(range.startContainer)) {
+  if (
+    range.startContainer.nodeType === Node.TEXT_NODE &&
+    startSpan.contains(range.startContainer)
+  ) {
     // Collect text content of startSpan up to range.startContainer.
-    startCharOffset = textOffsetWithinSpan(startSpan, range.startContainer as Text, range.startOffset);
+    startCharOffset = textOffsetWithinSpan(
+      startSpan,
+      range.startContainer as Text,
+      range.startOffset,
+    );
   } else {
     startCharOffset = 0;
   }
-  const srcStart = spanSrcStart + utf8ByteLength(startText.slice(0, startCharOffset));
+  const srcStart =
+    spanSrcStart + utf8ByteLength(startText.slice(0, startCharOffset));
 
   // ── end position ─────────────────────────────────────────────────────────
   const endSpan = nearestSrcEnd(range.endContainer, container);
@@ -97,8 +110,15 @@ export function resolveSourceRange(
   const spanSrcEnd = Number(endSpan.dataset.srcEnd);
   const endText = endSpan.textContent ?? "";
   let endCharOffset: number;
-  if (range.endContainer.nodeType === Node.TEXT_NODE && endSpan.contains(range.endContainer)) {
-    endCharOffset = textOffsetWithinSpan(endSpan, range.endContainer as Text, range.endOffset);
+  if (
+    range.endContainer.nodeType === Node.TEXT_NODE &&
+    endSpan.contains(range.endContainer)
+  ) {
+    endCharOffset = textOffsetWithinSpan(
+      endSpan,
+      range.endContainer as Text,
+      range.endOffset,
+    );
   } else {
     endCharOffset = endText.length;
   }
@@ -114,7 +134,11 @@ export function resolveSourceRange(
  * relative to the start of `span`'s text content, by walking text nodes in
  * document order.
  */
-function textOffsetWithinSpan(span: HTMLElement, targetNode: Text, charOffsetInNode: number): number {
+function textOffsetWithinSpan(
+  span: HTMLElement,
+  targetNode: Text,
+  charOffsetInNode: number,
+): number {
   const walker = document.createTreeWalker(span, NodeFilter.SHOW_TEXT);
   let offset = 0;
   let node = walker.nextNode() as Text | null;
@@ -134,7 +158,10 @@ function textOffsetWithinSpan(span: HTMLElement, targetNode: Text, charOffsetInN
  * "I don't understand" (first rewrite) to "I still don't understand" (open
  * the conversation dialog about an existing rewrite).
  */
-export function selectionTouchesRewrite(range: Range, container: HTMLElement): boolean {
+export function selectionTouchesRewrite(
+  range: Range,
+  container: HTMLElement,
+): boolean {
   const rewrites = container.querySelectorAll("[data-rewrite-id]");
   for (const r of Array.from(rewrites)) {
     if (range.intersectsNode(r)) return true;
@@ -148,7 +175,8 @@ export function selectionTouchesRewrite(range: Range, container: HTMLElement): b
  * actions (Define) from phrase-level actions (Tell me more).
  */
 export function selectedPhrase(selection: Selection | null): string | null {
-  if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return null;
+  if (!selection || selection.rangeCount === 0 || selection.isCollapsed)
+    return null;
   const trimmed = selection.toString().trim();
   if (!trimmed) return null;
   // Must contain internal whitespace to qualify as multi-word.
@@ -163,7 +191,8 @@ export function selectedPhrase(selection: Selection | null): string | null {
  * collapsed, or contains no word characters.
  */
 export function selectedSingleWord(selection: Selection | null): string | null {
-  if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return null;
+  if (!selection || selection.rangeCount === 0 || selection.isCollapsed)
+    return null;
 
   const trimmed = selection.toString().trim();
   if (!trimmed) return null;
@@ -179,7 +208,8 @@ export function selectedSingleWord(selection: Selection | null): string | null {
   const full = node.textContent ?? "";
 
   let anchor = range.startOffset;
-  while (anchor < range.endOffset && !WORD_CHAR.test(full[anchor] ?? "")) anchor++;
+  while (anchor < range.endOffset && !WORD_CHAR.test(full[anchor] ?? ""))
+    anchor++;
   if (anchor >= full.length || !WORD_CHAR.test(full[anchor] ?? "")) return null;
 
   let start = anchor;

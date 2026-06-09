@@ -1,31 +1,21 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum LlmProvider {
     Claude,
+    #[default]
     Ollama,
 }
 
-impl Default for LlmProvider {
-    fn default() -> Self {
-        LlmProvider::Ollama
-    }
-}
-
 /// Desired image quality. Persisted but not yet wired to generation behavior.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ImageQuality {
     Fast,
+    #[default]
     Medium,
     High,
-}
-
-impl Default for ImageQuality {
-    fn default() -> Self {
-        ImageQuality::Medium
-    }
 }
 
 #[derive(Debug, Clone)]

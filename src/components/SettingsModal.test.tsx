@@ -25,17 +25,25 @@ beforeEach(() => {
 
 describe("SettingsModal", () => {
   it("loads current settings into the form", async () => {
-    const { getByText, getByRole } = render(() => <SettingsModal onClose={() => {}} />);
-    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("get_settings"));
+    const { getByText, getByRole } = render(() => (
+      <SettingsModal onClose={() => {}} />
+    ));
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("get_settings"),
+    );
     expect(getByText("Settings")).toBeInTheDocument();
     // The configured key surfaces the remove affordance.
-    expect(getByRole("button", { name: "Remove stored key" })).toBeInTheDocument();
+    expect(
+      getByRole("button", { name: "Remove stored key" }),
+    ).toBeInTheDocument();
   });
 
   it("saves without a key change by sending null claudeApiKey", async () => {
     const onClose = vi.fn();
     const { getByRole } = render(() => <SettingsModal onClose={onClose} />);
-    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("get_settings"));
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("get_settings"),
+    );
 
     fireEvent.click(getByRole("button", { name: "Save" }));
 
@@ -43,7 +51,10 @@ describe("SettingsModal", () => {
       expect(mockInvoke).toHaveBeenCalledWith(
         "update_settings",
         expect.objectContaining({
-          update: expect.objectContaining({ claudeApiKey: null, imageQuality: "medium" }),
+          update: expect.objectContaining({
+            claudeApiKey: null,
+            imageQuality: "medium",
+          }),
         }),
       );
     });
@@ -51,8 +62,12 @@ describe("SettingsModal", () => {
   });
 
   it("sends the typed key on save", async () => {
-    const { getByRole, getByPlaceholderText } = render(() => <SettingsModal onClose={() => {}} />);
-    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("get_settings"));
+    const { getByRole, getByPlaceholderText } = render(() => (
+      <SettingsModal onClose={() => {}} />
+    ));
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("get_settings"),
+    );
 
     fireEvent.input(getByPlaceholderText(/leave blank to keep/), {
       target: { value: "sk-ant-new" },
@@ -62,21 +77,27 @@ describe("SettingsModal", () => {
     await waitFor(() => {
       expect(mockInvoke).toHaveBeenCalledWith(
         "update_settings",
-        expect.objectContaining({ update: expect.objectContaining({ claudeApiKey: "sk-ant-new" }) }),
+        expect.objectContaining({
+          update: expect.objectContaining({ claudeApiKey: "sk-ant-new" }),
+        }),
       );
     });
   });
 
   it("clears the key via the remove button", async () => {
     const { getByRole } = render(() => <SettingsModal onClose={() => {}} />);
-    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("get_settings"));
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("get_settings"),
+    );
 
     fireEvent.click(getByRole("button", { name: "Remove stored key" }));
 
     await waitFor(() => {
       expect(mockInvoke).toHaveBeenCalledWith(
         "update_settings",
-        expect.objectContaining({ update: expect.objectContaining({ clearClaudeKey: true }) }),
+        expect.objectContaining({
+          update: expect.objectContaining({ clearClaudeKey: true }),
+        }),
       );
     });
   });

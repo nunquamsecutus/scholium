@@ -28,13 +28,17 @@ beforeEach(() => {
 describe("SelectionToolbar", () => {
   it("does not render without a selection", () => {
     const article = mountArticle();
-    const { queryByRole } = render(() => <SelectionToolbar container={() => article} />);
+    const { queryByRole } = render(() => (
+      <SelectionToolbar container={() => article} />
+    ));
     expect(queryByRole("toolbar")).not.toBeInTheDocument();
   });
 
   it("appears when a single word is selected inside the container", async () => {
     const article = mountArticle();
-    const { findByRole } = render(() => <SelectionToolbar container={() => article} />);
+    const { findByRole } = render(() => (
+      <SelectionToolbar container={() => article} />
+    ));
     selectInside(article, 0, 5);
     expect(await findByRole("button", { name: "Define" })).toBeInTheDocument();
   });
@@ -45,7 +49,9 @@ describe("SelectionToolbar", () => {
     outside.textContent = "elsewhere";
     document.body.appendChild(outside);
 
-    const { queryByRole } = render(() => <SelectionToolbar container={() => article} />);
+    const { queryByRole } = render(() => (
+      <SelectionToolbar container={() => article} />
+    ));
     const range = document.createRange();
     range.setStart(outside.firstChild!, 0);
     range.setEnd(outside.firstChild!, 5);
@@ -59,24 +65,34 @@ describe("SelectionToolbar", () => {
 
   it("does not appear when no container is mounted", () => {
     mountArticle();
-    const { queryByRole } = render(() => <SelectionToolbar container={() => undefined} />);
+    const { queryByRole } = render(() => (
+      <SelectionToolbar container={() => undefined} />
+    ));
     selectInside(document.querySelector("article")!, 0, 5);
     expect(queryByRole("toolbar")).not.toBeInTheDocument();
   });
 
   it("shows Tell me more (not Define) for multi-word selections", async () => {
     const article = mountArticle();
-    const { findByRole, queryByRole } = render(() => <SelectionToolbar container={() => article} />);
+    const { findByRole, queryByRole } = render(() => (
+      <SelectionToolbar container={() => article} />
+    ));
     selectInside(article, 0, 11);
-    expect(await findByRole("button", { name: "Tell me more" })).toBeInTheDocument();
+    expect(
+      await findByRole("button", { name: "Tell me more" }),
+    ).toBeInTheDocument();
     expect(queryByRole("button", { name: "Define" })).not.toBeInTheDocument();
   });
 
   it("shows I don't understand alongside Tell me more for multi-word selections", async () => {
     const article = mountArticle();
-    const { findByRole } = render(() => <SelectionToolbar container={() => article} />);
+    const { findByRole } = render(() => (
+      <SelectionToolbar container={() => article} />
+    ));
     selectInside(article, 0, 11);
-    expect(await findByRole("button", { name: "I don't understand" })).toBeInTheDocument();
+    expect(
+      await findByRole("button", { name: "I don't understand" }),
+    ).toBeInTheDocument();
   });
 
   it("swaps to 'I still don't understand' when selection touches a rewrite span", async () => {
@@ -94,8 +110,12 @@ describe("SelectionToolbar", () => {
     sel.removeAllRanges();
     sel.addRange(range);
     document.dispatchEvent(new Event("selectionchange"));
-    expect(await findByRole("button", { name: "I still don't understand" })).toBeInTheDocument();
-    expect(queryByRole("button", { name: "I don't understand" })).not.toBeInTheDocument();
+    expect(
+      await findByRole("button", { name: "I still don't understand" }),
+    ).toBeInTheDocument();
+    expect(
+      queryByRole("button", { name: "I don't understand" }),
+    ).not.toBeInTheDocument();
   });
 
   it("'I still don't understand' fires onRewriteConversation with the rewrite id", async () => {
@@ -104,7 +124,10 @@ describe("SelectionToolbar", () => {
     article.innerHTML = `<p>before <span data-rewrite-id="7">rewritten content</span> after</p>`;
     document.body.appendChild(article);
     const { findByRole } = render(() => (
-      <SelectionToolbar container={() => article} onRewriteConversation={onRewriteConversation} />
+      <SelectionToolbar
+        container={() => article}
+        onRewriteConversation={onRewriteConversation}
+      />
     ));
     const innerText = article.querySelector("span")!.firstChild as Text;
     const range = document.createRange();
@@ -114,7 +137,9 @@ describe("SelectionToolbar", () => {
     sel.removeAllRanges();
     sel.addRange(range);
     document.dispatchEvent(new Event("selectionchange"));
-    fireEvent.click(await findByRole("button", { name: "I still don't understand" }));
+    fireEvent.click(
+      await findByRole("button", { name: "I still don't understand" }),
+    );
 
     expect(onRewriteConversation).toHaveBeenCalledTimes(1);
     const [rewriteId, r] = onRewriteConversation.mock.calls[0];
@@ -126,7 +151,10 @@ describe("SelectionToolbar", () => {
     const onDrawDiagram = vi.fn();
     const article = mountArticle();
     const { findByRole } = render(() => (
-      <SelectionToolbar container={() => article} onDrawDiagram={onDrawDiagram} />
+      <SelectionToolbar
+        container={() => article}
+        onDrawDiagram={onDrawDiagram}
+      />
     ));
     selectInside(article, 0, 11);
     fireEvent.click(await findByRole("button", { name: "Diagram" }));
@@ -141,7 +169,10 @@ describe("SelectionToolbar", () => {
     const onDrawPicture = vi.fn();
     const article = mountArticle();
     const { findByRole } = render(() => (
-      <SelectionToolbar container={() => article} onDrawPicture={onDrawPicture} />
+      <SelectionToolbar
+        container={() => article}
+        onDrawPicture={onDrawPicture}
+      />
     ));
     selectInside(article, 0, 11);
     fireEvent.click(await findByRole("button", { name: "Draw a picture" }));
@@ -169,10 +200,14 @@ describe("SelectionToolbar", () => {
 
   it("Tell me more reveals the Footnote sub-action", async () => {
     const article = mountArticle();
-    const { findByRole } = render(() => <SelectionToolbar container={() => article} />);
+    const { findByRole } = render(() => (
+      <SelectionToolbar container={() => article} />
+    ));
     selectInside(article, 0, 11);
     fireEvent.click(await findByRole("button", { name: "Tell me more" }));
-    expect(await findByRole("button", { name: "Footnote" })).toBeInTheDocument();
+    expect(
+      await findByRole("button", { name: "Footnote" }),
+    ).toBeInTheDocument();
   });
 
   it("Footnote click fires onFootnote with the phrase and a range", async () => {
@@ -225,11 +260,15 @@ describe("SelectionToolbar", () => {
 
   it("Back returns from the expand sub-menu to the primary toolbar", async () => {
     const article = mountArticle();
-    const { findByRole, queryByRole } = render(() => <SelectionToolbar container={() => article} />);
+    const { findByRole, queryByRole } = render(() => (
+      <SelectionToolbar container={() => article} />
+    ));
     selectInside(article, 0, 11);
     fireEvent.click(await findByRole("button", { name: "Tell me more" }));
     fireEvent.click(await findByRole("button", { name: "Back" }));
-    expect(await findByRole("button", { name: "Tell me more" })).toBeInTheDocument();
+    expect(
+      await findByRole("button", { name: "Tell me more" }),
+    ).toBeInTheDocument();
     expect(queryByRole("button", { name: "Footnote" })).not.toBeInTheDocument();
   });
 
@@ -301,10 +340,15 @@ describe("SelectionToolbar", () => {
     const onReadFromHere = vi.fn();
     const article = mountArticle();
     const { findByRole } = render(() => (
-      <SelectionToolbar container={() => article} onReadFromHere={onReadFromHere} />
+      <SelectionToolbar
+        container={() => article}
+        onReadFromHere={onReadFromHere}
+      />
     ));
     selectInside(article, 0, 5); // "hello" — single word
-    expect(await findByRole("button", { name: "Read from here" })).toBeInTheDocument();
+    expect(
+      await findByRole("button", { name: "Read from here" }),
+    ).toBeInTheDocument();
   });
 
   it("does not show Read from here when onReadFromHere is not provided", async () => {
@@ -314,14 +358,19 @@ describe("SelectionToolbar", () => {
     ));
     selectInside(article, 0, 5);
     await findByRole("button", { name: "Define" }); // wait for toolbar to appear
-    expect(queryByRole("button", { name: "Read from here" })).not.toBeInTheDocument();
+    expect(
+      queryByRole("button", { name: "Read from here" }),
+    ).not.toBeInTheDocument();
   });
 
   it("calls onReadFromHere with the word and Range when clicked", async () => {
     const onReadFromHere = vi.fn();
     const article = mountArticle();
     const { findByRole } = render(() => (
-      <SelectionToolbar container={() => article} onReadFromHere={onReadFromHere} />
+      <SelectionToolbar
+        container={() => article}
+        onReadFromHere={onReadFromHere}
+      />
     ));
     selectInside(article, 0, 5);
     fireEvent.click(await findByRole("button", { name: "Read from here" }));

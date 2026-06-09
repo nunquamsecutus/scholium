@@ -18,11 +18,15 @@ beforeEach(() => {
 const noop = () => {};
 
 async function selectReadingLevel(container: ParentNode, level = "Adult") {
-  const card = Array.from(container.querySelectorAll(".reading-level-card")).find(
-    (el) => el.textContent?.includes(level)
-  ) as HTMLElement;
+  const card = Array.from(
+    container.querySelectorAll(".reading-level-card"),
+  ).find((el) => el.textContent?.includes(level)) as HTMLElement;
   fireEvent.click(card);
-  fireEvent.click(container.querySelector(".reading-level-actions .btn-primary") as HTMLElement);
+  fireEvent.click(
+    container.querySelector(
+      ".reading-level-actions .btn-primary",
+    ) as HTMLElement,
+  );
 }
 
 describe("OnboardingView", () => {
@@ -66,8 +70,13 @@ describe("OnboardingView", () => {
       <OnboardingView topic="black holes" onBook={noop} onBack={noop} />
     ));
     await selectReadingLevel(container);
-    expect(await findByText("What is your background in physics?")).toBeInTheDocument();
-    expect(mockInvoke).toHaveBeenCalledWith("begin_onboarding", { topic: "black holes", readingLevel: "adult" });
+    expect(
+      await findByText("What is your background in physics?"),
+    ).toBeInTheDocument();
+    expect(mockInvoke).toHaveBeenCalledWith("begin_onboarding", {
+      topic: "black holes",
+      readingLevel: "adult",
+    });
   });
 
   it.each([
@@ -75,25 +84,28 @@ describe("OnboardingView", () => {
     ["Teen", "teen"],
     ["Adult", "adult"],
     ["Academic", "academic"],
-  ])("selecting %s passes readingLevel '%s' to begin_onboarding", async (label, level) => {
-    mockInvoke.mockResolvedValue("Hello!");
-    const { container } = render(() => (
-      <OnboardingView topic="test" onBook={noop} onBack={noop} />
-    ));
-    await selectReadingLevel(container, label);
-    expect(mockInvoke).toHaveBeenCalledWith("begin_onboarding", {
-      topic: "test",
-      readingLevel: level,
-    });
-  });
+  ])(
+    "selecting %s passes readingLevel '%s' to begin_onboarding",
+    async (label, level) => {
+      mockInvoke.mockResolvedValue("Hello!");
+      const { container } = render(() => (
+        <OnboardingView topic="test" onBook={noop} onBack={noop} />
+      ));
+      await selectReadingLevel(container, label);
+      expect(mockInvoke).toHaveBeenCalledWith("begin_onboarding", {
+        topic: "test",
+        readingLevel: level,
+      });
+    },
+  );
 
   it("selected card receives the --selected class", () => {
     const { container } = render(() => (
       <OnboardingView topic="test" onBook={noop} onBack={noop} />
     ));
-    const teenCard = Array.from(container.querySelectorAll(".reading-level-card")).find(
-      (el) => el.textContent?.includes("Teen")
-    ) as HTMLElement;
+    const teenCard = Array.from(
+      container.querySelectorAll(".reading-level-card"),
+    ).find((el) => el.textContent?.includes("Teen")) as HTMLElement;
     fireEvent.click(teenCard);
     expect(teenCard).toHaveClass("reading-level-card--selected");
   });
@@ -113,7 +125,12 @@ describe("OnboardingView", () => {
   it("passes readingLevel to generate_lesson_plan", async () => {
     mockInvoke
       .mockResolvedValueOnce("Tell me what you know.")
-      .mockResolvedValue({ summary: "s", description: "d", priorKnowledge: "p", lessonPlan: { summary: "s", chapters: [] } });
+      .mockResolvedValue({
+        summary: "s",
+        description: "d",
+        priorKnowledge: "p",
+        lessonPlan: { summary: "s", chapters: [] },
+      });
 
     const { container, findByRole, getByRole } = render(() => (
       <OnboardingView topic="black holes" onBook={noop} onBack={noop} />
@@ -125,7 +142,7 @@ describe("OnboardingView", () => {
     await waitFor(() => {
       expect(mockInvoke).toHaveBeenCalledWith(
         "generate_lesson_plan",
-        expect.objectContaining({ topic: "black holes", readingLevel: "teen" })
+        expect.objectContaining({ topic: "black holes", readingLevel: "teen" }),
       );
     });
   });
@@ -136,7 +153,9 @@ describe("OnboardingView", () => {
       <OnboardingView topic="black holes" onBook={noop} onBack={noop} />
     ));
     await selectReadingLevel(container);
-    expect(getByRole("button", { name: /Generate Lesson Plan/ })).toBeDisabled();
+    expect(
+      getByRole("button", { name: /Generate Lesson Plan/ }),
+    ).toBeDisabled();
   });
 
   it("Generate Lesson Plan enables after first LLM response", async () => {
@@ -145,7 +164,9 @@ describe("OnboardingView", () => {
       <OnboardingView topic="black holes" onBook={noop} onBack={noop} />
     ));
     await selectReadingLevel(container);
-    expect(await findByRole("button", { name: /Generate Lesson Plan/ })).not.toBeDisabled();
+    expect(
+      await findByRole("button", { name: /Generate Lesson Plan/ }),
+    ).not.toBeDisabled();
   });
 
   it("sends user message and calls continue_onboarding", async () => {
@@ -165,7 +186,10 @@ describe("OnboardingView", () => {
     await waitFor(() => {
       expect(mockInvoke).toHaveBeenCalledWith(
         "continue_onboarding",
-        expect.objectContaining({ topic: "black holes", readingLevel: "adult" })
+        expect.objectContaining({
+          topic: "black holes",
+          readingLevel: "adult",
+        }),
       );
     });
   });

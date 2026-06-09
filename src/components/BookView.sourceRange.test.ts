@@ -57,7 +57,7 @@ describe("resolveSourceRange", () => {
     const c = mountHtml(
       `<p data-src-start="0" data-src-end="13">` +
         `<span data-src-start="0" data-src-end="13">Hello world.</span>` +
-      `</p>`,
+        `</p>`,
     );
     const span = c.querySelector("span")!;
     const range = rangeForSpan(span as HTMLElement);
@@ -104,7 +104,7 @@ describe("resolveSourceRange", () => {
       `<p>` +
         `<sup data-src-skip data-note-id="1">📖</sup>` +
         `<span data-src-start="6" data-src-end="14"> is here</span>` +
-      `</p>`,
+        `</p>`,
     );
     const sup = c.querySelector("sup")!;
     const supText = sup.firstChild as Text;
@@ -121,7 +121,7 @@ describe("resolveSourceRange", () => {
       `<p>` +
         `<span data-src-start="0" data-src-end="5">Hello</span>` +
         `<sup data-src-skip data-note-id="1">📖</sup>` +
-      `</p>`,
+        `</p>`,
     );
     const span = c.querySelector("span")!;
     const spanText = span.firstChild as Text;
@@ -140,7 +140,7 @@ describe("resolveSourceRange", () => {
       `<p>` +
         `<span data-src-start="0" data-src-end="4">The </span>` +
         `<strong><span data-src-start="6" data-src-end="11">world</span></strong>` +
-      `</p>`,
+        `</p>`,
     );
     const spans = c.querySelectorAll("span");
     const firstText = spans[0].firstChild as Text;
@@ -171,7 +171,7 @@ describe("paragraphContext", () => {
   it("returns the containing paragraph text", () => {
     const c = mountHtml(
       `<p>Intro paragraph.</p>` +
-      `<p><span data-src-start="17" data-src-end="41">The blackhole is here.</span></p>`,
+        `<p><span data-src-start="17" data-src-end="41">The blackhole is here.</span></p>`,
     );
     const span = c.querySelectorAll("span")[0]!;
     const textNode = span.firstChild as Text;
@@ -184,8 +184,8 @@ describe("paragraphContext", () => {
   it("walks up to the closest block ancestor through inline formatting", () => {
     const c = mountHtml(
       `<p><span data-src-start="0" data-src-end="30">Text with </span>` +
-      `<strong><span data-src-start="10" data-src-end="19">bold word</span></strong>` +
-      `<span data-src-start="21" data-src-end="30"> inside.</span></p>`,
+        `<strong><span data-src-start="10" data-src-end="19">bold word</span></strong>` +
+        `<span data-src-start="21" data-src-end="30"> inside.</span></p>`,
     );
     const strong = c.querySelector("strong")!.querySelector("span")!;
     const textNode = strong.firstChild as Text;
