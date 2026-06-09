@@ -20,3 +20,58 @@ key is stored in the OS keyring. The CLI flags below remain available as a
 dev override.
 
 `npm run tauri dev`
+
+# Development
+
+## Commands
+
+| Command | Description |
+|---|---|
+| `npm run dev` | Start Vite dev server (frontend only) |
+| `npm run tauri dev` | Run full Tauri app (hot-reload) |
+| `npm test` | Run tests once |
+| `npm run test:watch` | Run tests in watch mode |
+| `npm run build` | Vite production build |
+| `npm run tauri build` | Build Tauri app for distribution |
+
+## Checks and formatting
+
+Run all checks before pushing (or let the pre-push hook do it automatically):
+
+```sh
+npm run check
+```
+
+This runs four checks in sequence:
+
+| Command | What it does |
+|---|---|
+| `npm run typecheck` | TypeScript type-check (`tsc --noEmit`) |
+| `npm run lint:ts` | ESLint with TypeScript + SolidJS rules |
+| `npm run lint:fmt` | Prettier format check |
+| `npm run lint:rs` | Cargo Clippy with `-D warnings` |
+
+To auto-format everything in one shot:
+
+```sh
+npm run fmt
+```
+
+This runs `prettier --write` on all TypeScript files and `cargo fmt` on the
+Rust codebase.
+
+### Pre-push hook
+
+[lefthook](https://github.com/evilmartians/lefthook) runs all four checks in
+parallel on every `git push`. The hook is installed automatically when you run
+`npm install` (via the `prepare` script). To reinstall manually:
+
+```sh
+npx lefthook install
+```
+
+To skip the hook in an emergency:
+
+```sh
+LEFTHOOK=0 git push
+```
