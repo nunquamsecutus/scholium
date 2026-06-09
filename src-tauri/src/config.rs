@@ -4,7 +4,7 @@
 use crate::settings::StoredConfig;
 use std::path::{Path, PathBuf};
 
-const KEYRING_SERVICE: &str = "com.brent.edu-harness";
+const KEYRING_SERVICE: &str = "com.brent.scholium";
 const KEYRING_USER: &str = "claude_api_key";
 
 pub fn config_path(dir: &Path) -> PathBuf {
@@ -50,7 +50,7 @@ mod tests {
 
     #[test]
     fn config_save_load_round_trip() {
-        let dir = std::env::temp_dir().join(format!("edu-harness-cfg-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("scholium-cfg-{}", uuid::Uuid::new_v4()));
         let mut s = Settings::default();
         s.provider = LlmProvider::Claude;
         s.image_quality = ImageQuality::High;
@@ -65,7 +65,7 @@ mod tests {
 
     #[test]
     fn load_missing_config_is_none() {
-        let dir = std::env::temp_dir().join(format!("edu-harness-missing-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("scholium-missing-{}", uuid::Uuid::new_v4()));
         assert!(load_config(&dir).is_none());
     }
 }

@@ -1,4 +1,4 @@
-//! Import a directory of markdown files into an edu-harness book.
+//! Import a directory of markdown files into a Scholium book.
 
 use crate::manifest::{Chapter, ChapterStatus, LessonPlan, Manifest, Metadata};
 use crate::onboarding::slugify;
@@ -159,7 +159,7 @@ mod tests {
     use super::*;
 
     fn temp_dir() -> std::path::PathBuf {
-        std::env::temp_dir().join(format!("edu-harness-import-{}", uuid::Uuid::new_v4()))
+        std::env::temp_dir().join(format!("scholium-import-{}", uuid::Uuid::new_v4()))
     }
 
     #[test]

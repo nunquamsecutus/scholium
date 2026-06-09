@@ -63,7 +63,7 @@ export default function WelcomeModal(props: Props) {
   return (
     <div class="modal-overlay">
       <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
-        <h1 id="modal-title" class="modal-app-name">Edu Harness</h1>
+        <h1 id="modal-title" class="modal-app-name">Scholium</h1>
         <p class="modal-tagline">Your personal interactive learning companion</p>
 
         <div class="modal-body">

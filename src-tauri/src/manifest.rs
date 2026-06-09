@@ -140,7 +140,7 @@ mod tests {
 
     #[test]
     fn load_save_roundtrip() {
-        let path = std::env::temp_dir().join("edu-harness-test.edubook");
+        let path = std::env::temp_dir().join("scholium-test.edubook");
         let original = sample();
         save(&original, &path).unwrap();
         let loaded = load(&path).unwrap();

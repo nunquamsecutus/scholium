@@ -18,7 +18,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 describe("App / WelcomeModal", () => {
   it("renders the app name", () => {
     const { getByText } = render(() => <App />);
-    expect(getByText("Edu Harness")).toBeInTheDocument();
+    expect(getByText("Scholium")).toBeInTheDocument();
   });
 
   it("renders the topic prompt label", () => {
