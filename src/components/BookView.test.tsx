@@ -27,13 +27,13 @@ const baseManifest: Manifest = {
       {
         id: "ch-01",
         title: "Stellar Evolution",
-        file: "chapters/01-stellar-evolution.edupage",
+        file: "chapters/01-stellar-evolution.md",
         status: "planned",
       },
       {
         id: "ch-02",
         title: "Gravitational Collapse",
-        file: "chapters/02-gravitational-collapse.edupage",
+        file: "chapters/02-gravitational-collapse.md",
         status: "generated",
       },
     ],

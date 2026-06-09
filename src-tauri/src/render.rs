@@ -344,7 +344,7 @@ fn merge_adjacent_texts(events: Vec<(Event<'_>, std::ops::Range<usize>)>) -> Vec
 /// Render an edupage's reconstructed markdown to annotated HTML.
 ///
 /// `markdown` must be the *reconstructed* markdown (the output of
-/// `edupage::reconstruct`), not the raw `.edupage` file.  The byte offsets
+/// `edupage::read`), not the raw `.md` file.  The byte offsets
 /// emitted in `data-src-start` / `data-src-end` attributes refer to positions
 /// in this string.
 pub fn render_chapter_html(
